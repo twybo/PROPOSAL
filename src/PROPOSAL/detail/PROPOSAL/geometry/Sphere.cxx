@@ -83,12 +83,33 @@ std::pair<double, double> Sphere::DistanceToBorder(const Vector3D& position, con
 
     B = (position - position_) * direction;
 
-    determinant = B * B - A;
+    const auto direction_squared = direction * direction;
+    const auto direction_length = std::sqrt(direction_squared);
+    const bool distant_outer = std::abs(B) > 1024 * radius_ * direction_length;
+    double perpendicular_squared = 0;
+    if (distant_outer)
+    {
+        // Avoid subtracting squared Earth-scale distances for a small sphere.
+        const auto perpendicular = vector_product(Cartesian3D(position) - position_, Cartesian3D(direction));
+        perpendicular_squared = perpendicular * perpendicular;
+    }
+
+    determinant = distant_outer
+        ? direction_squared * radius_ * radius_ - perpendicular_squared
+        : B * B - A;
 
     if (determinant > 0) // determinant == 0 (boundery point) is ignored
     {
-        t1 = -1 * B + std::sqrt(determinant);
-        t2 = -1 * B - std::sqrt(determinant);
+        if (distant_outer)
+        {
+            t1 = (-B + std::sqrt(determinant)) / direction_squared;
+            t2 = (-B - std::sqrt(determinant)) / direction_squared;
+        }
+        else
+        {
+            t1 = -1 * B + std::sqrt(determinant);
+            t2 = -1 * B - std::sqrt(determinant);
+        }
 
         // Computer precision controll
         if (t1 > 0 && t1 < GEOMETRY_PRECISION)
@@ -144,12 +165,28 @@ std::pair<double, double> Sphere::DistanceToBorder(const Vector3D& position, con
     {
         A = difference_length_squared - inner_radius_ * inner_radius_;
 
-        determinant = B * B - A;
+        const bool distant_inner = std::abs(B) > 1024 * inner_radius_ * direction_length;
+        if (distant_inner && !distant_outer)
+        {
+            const auto perpendicular = vector_product(Cartesian3D(position) - position_, Cartesian3D(direction));
+            perpendicular_squared = perpendicular * perpendicular;
+        }
+        determinant = distant_inner
+            ? direction_squared * inner_radius_ * inner_radius_ - perpendicular_squared
+            : B * B - A;
 
         if (determinant > 0) // determinant == 0 (boundery point) is ignored
         {
-            t1 = -1 * B + std::sqrt(determinant);
-            t2 = -1 * B - std::sqrt(determinant);
+            if (distant_inner)
+            {
+                t1 = (-B + std::sqrt(determinant)) / direction_squared;
+                t2 = (-B - std::sqrt(determinant)) / direction_squared;
+            }
+            else
+            {
+                t1 = -1 * B + std::sqrt(determinant);
+                t2 = -1 * B - std::sqrt(determinant);
+            }
 
             // Computer precision controll
             if (t1 > 0 && t1 < GEOMETRY_PRECISION)
