@@ -29,7 +29,8 @@ public:
     Secondaries Propagate(const ParticleState& initial_particle,
         double max_distance = 1e20, double min_energy = 0.,
         unsigned int hierarchy_condition = 0,
-        unsigned int stop_on_entry_hierarchy = 0);
+        unsigned int stop_on_entry_hierarchy = 0,
+        bool stop_on_invalid_scattering = false);
     multiple_scattering::MoliereDiagnostics GetMoliereDiagnostics() const
     { return moliere_diagnostics_; }
     const std::string& GetLastTerminationReason() const
@@ -43,7 +44,8 @@ private:
                         const double max_distance, std::function<double()> rnd,
                         Sector& current_sector, bool min_energy_step,
                         const double min_energy, unsigned int hierarchy_condition,
-                        unsigned int stop_on_entry_hierarchy);
+                        unsigned int stop_on_entry_hierarchy,
+                        bool stop_on_invalid_scattering);
     double CalculateDistanceToBorder(const Vector3D& particle_position,
         const Vector3D& particle_direction, const Geometry& current_geometry);
     int maximize(const std::array<double, 3>& InteractionEnergies);
@@ -89,7 +91,8 @@ private:
         ReachedMaxDistance = 2,
         ReachedBorder = 3,
         ReachedHierarchyEntry = 4,
-        ReachedHierarchyExit = 5
+        ReachedHierarchyExit = 5,
+        InvalidScattering = 6
     };
 
     std::vector<Sector> sector_list;

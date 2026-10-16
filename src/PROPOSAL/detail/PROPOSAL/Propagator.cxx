@@ -26,12 +26,24 @@
 #include "PROPOSAL/propagation_utility/TimeBuilder.h"
 #include "PROPOSAL/scattering/ScatteringFactory.h"
 #include <fstream>
+#include <cmath>
 
 #include <iomanip>
 
 using namespace PROPOSAL;
 using std::get;
 using std::string;
+
+namespace {
+bool IsFiniteUnitDirection(const Vector3D& direction)
+{
+    for (const auto coordinate : direction.GetCartesianCoordinates()) {
+        if (!std::isfinite(coordinate))
+            return false;
+    }
+    return std::abs(direction.magnitude() - 1.) <= 5.e-12;
+}
+}
 
 Propagator::Propagator(const ParticleDef& p_def, std::vector<Sector> sectors)
     : p_def(p_def)
@@ -57,7 +69,7 @@ Propagator::Propagator(const ParticleDef& p_def, const nlohmann::json& config)
 
 Secondaries Propagator::Propagate(const ParticleState& initial_particle,
     double max_distance, double min_energy, unsigned int hierarchy_condition,
-    unsigned int stop_on_entry_hierarchy)
+    unsigned int stop_on_entry_hierarchy, bool stop_on_invalid_scattering)
 {
     multiple_scattering::Moliere::ResetDiagnostics();
     last_termination_reason_ = "unknown";
@@ -93,7 +105,12 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                 state, energy_at_next_interaction, max_distance, rnd,
                 current_sector, next_interaction_type == MinimalE,
                 InteractionEnergy[MinimalE], hierarchy_condition,
-                stop_on_entry_hierarchy);
+                stop_on_entry_hierarchy, stop_on_invalid_scattering);
+
+        if (advancement_type == InvalidScattering) {
+            last_termination_reason_ = "invalid_scattering";
+            break;
+        }
 
         // If the particle is on the sector border before the continuous step is
         // performed in 'AdvanceParticle', we might enter a different sector due
@@ -107,7 +124,19 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
         case ReachedInteraction:
             switch (next_interaction_type) {
             case Stochastic: {
-                auto loss = DoStochasticInteraction(state, utility, rnd);
+                Interaction::Loss loss;
+                if (stop_on_invalid_scattering) {
+                    auto proposed_state = state;
+                    loss = DoStochasticInteraction(proposed_state, utility, rnd);
+                    if (!IsFiniteUnitDirection(proposed_state.direction)) {
+                        continue_propagation = false;
+                        last_termination_reason_ = "invalid_scattering";
+                        break;
+                    }
+                    state = proposed_state;
+                } else {
+                    loss = DoStochasticInteraction(state, utility, rnd);
+                }
                 if (loss.type != InteractionType::Undefined)
                     track.push_back(state, loss.type, loss.comp_hash);
                 if (state.energy <= InteractionEnergy[MinimalE]) {
@@ -180,7 +209,8 @@ int Propagator::AdvanceParticle(ParticleState &state,
     const double energy_next_interaction, const double final_distance,
     std::function<double()> rnd_generator, Sector& current_sector,
     bool min_energy_step, const double min_energy,
-    unsigned int hierarchy_condition, unsigned int stop_on_entry_hierarchy) {
+    unsigned int hierarchy_condition, unsigned int stop_on_entry_hierarchy,
+    bool stop_on_invalid_scattering) {
 
     auto& utility = get<UTILITY>(current_sector);
     auto& density = get<DENSITY_DISTR>(current_sector);
@@ -257,6 +287,11 @@ int Propagator::AdvanceParticle(ParticleState &state,
         // Calculate scattering proposal
         std::tie(mean_direction, new_direction) = utility.DirectionsScatter(
                 grammage, state.energy, energy, state.direction, rnd);
+
+        if (stop_on_invalid_scattering
+            && (!IsFiniteUnitDirection(mean_direction)
+                || !IsFiniteUnitDirection(new_direction)))
+            return InvalidScattering;
 
         // Check step
         double distance_to_border = CalculateDistanceToBorder(state.position, mean_direction, *geometry);
