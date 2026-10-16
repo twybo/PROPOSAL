@@ -64,6 +64,7 @@ PYBIND11_MODULE(proposal, m)
     m.attr("atmfcp_scattering_patch") = "moliere-charge-v1-entry-v1";
     m.attr("atmfcp_scattering_domain_guard") = "stop-before-invalid-state-v1";
     m.attr("atmfcp_boundary_precision_patch") = "sphere-distant-cross-product-v1";
+    m.attr("atmfcp_scattering_boundary_guard") = "stop-before-inconsistent-sphere-crossing-v1";
 
     py::class_<Vector3D, std::shared_ptr<Vector3D>>(m, "Vector3D")
         .def("__str__", &py_print<Vector3D>)

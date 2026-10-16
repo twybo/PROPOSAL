@@ -17,6 +17,7 @@
 #include "PROPOSAL/crosssection/ParticleDefaultCrossSectionList.h"
 #include "PROPOSAL/density_distr/density_distr.h"
 #include "PROPOSAL/geometry/GeometryFactory.h"
+#include "PROPOSAL/geometry/Sphere.h"
 #include "PROPOSAL/math/RandomGenerator.h"
 #include "PROPOSAL/medium/MediumFactory.h"
 #include "PROPOSAL/particle/ParticleDef.h"
@@ -42,6 +43,20 @@ bool IsFiniteUnitDirection(const Vector3D& direction)
             return false;
     }
     return std::abs(direction.magnitude() - 1.) <= 5.e-12;
+}
+
+bool HasConsistentSphereCrossing(const Geometry& geometry,
+    const Vector3D& position, const Cartesian3D& mean_direction,
+    const Cartesian3D& new_direction)
+{
+    const auto* sphere = dynamic_cast<const Sphere*>(&geometry);
+    if (sphere == nullptr)
+        return true;
+    const auto normal = Cartesian3D(position) - sphere->GetPosition();
+    const auto mean_orientation = normal * mean_direction;
+    const auto final_orientation = normal * new_direction;
+    return (mean_orientation > 0 && final_orientation > 0)
+        || (mean_orientation < 0 && final_orientation < 0);
 }
 }
 
@@ -316,12 +331,20 @@ int Propagator::AdvanceParticle(ParticleState &state,
             const auto tangent_sector = GetCurrentSector(state.position, new_direction);
             const auto hierarchy_f = get<GEOMETRY>(tangent_sector)->GetHierarchy();
             if (hierarchy_i > hierarchy_condition && hierarchy_f < hierarchy_condition) {
+                if (stop_on_invalid_scattering
+                    && !HasConsistentSphereCrossing(*geometry, state.position,
+                        mean_direction, new_direction))
+                    return InvalidScattering;
                 state.direction = new_direction;
                 return ReachedHierarchyExit;
             }
             if (stop_on_entry_hierarchy != 0
                 && hierarchy_i < stop_on_entry_hierarchy
                 && hierarchy_f >= stop_on_entry_hierarchy) {
+                if (stop_on_invalid_scattering
+                    && !HasConsistentSphereCrossing(*get<GEOMETRY>(tangent_sector),
+                        state.position, mean_direction, new_direction))
+                    return InvalidScattering;
                 state.direction = new_direction;
                 return ReachedHierarchyEntry;
             }
@@ -364,6 +387,20 @@ int Propagator::AdvanceParticle(ParticleState &state,
             grammage = -1;
         }
     } while (advancement_type == InvalidStep);
+
+    if (stop_on_invalid_scattering && advancement_type == ReachedBorder) {
+        const auto proposed_position = state.position + distance * mean_direction;
+        for (const auto& sector : sector_list) {
+            const auto& boundary = get<GEOMETRY>(sector);
+            if (boundary->GetHierarchy() < geometry->GetHierarchy())
+                continue;
+            const auto border = boundary->DistanceToBorder(state.position, mean_direction).first;
+            if (border >= 0 && std::abs(border - distance) <= PARTICLE_POSITION_RESOLUTION
+                && !HasConsistentSphereCrossing(*boundary, proposed_position,
+                    mean_direction, new_direction))
+                return InvalidScattering;
+        }
+    }
 
     state.time = state.time + utility.TimeElapsed(state.energy, energy, grammage, density->Evaluate(state.position)); // TODO: should the energy passed here be the randomized energy or not?
     state.position = state.position + distance * mean_direction;
