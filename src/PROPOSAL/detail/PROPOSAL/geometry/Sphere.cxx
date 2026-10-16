@@ -83,7 +83,8 @@ std::pair<double, double> Sphere::DistanceToBorder(const Vector3D& position, con
 
     B = (position - position_) * direction;
 
-    const auto direction_squared = direction * direction;
+    const auto tangent = Cartesian3D(direction);
+    const auto direction_squared = tangent * tangent;
     const auto direction_length = std::sqrt(direction_squared);
     const bool distant_outer = std::abs(B) > 1024 * radius_ * direction_length;
     double perpendicular_squared = 0;
