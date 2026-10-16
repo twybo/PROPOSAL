@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PROPOSAL/Secondaries.h"
+#include "PROPOSAL/scattering/multiple_scattering/Moliere.h"
 #include <nlohmann/json.hpp>
 #include <unordered_map>
 
@@ -27,7 +28,12 @@ public:
 
     Secondaries Propagate(const ParticleState& initial_particle,
         double max_distance = 1e20, double min_energy = 0.,
-        unsigned int hierarchy_condition = 0);
+        unsigned int hierarchy_condition = 0,
+        unsigned int stop_on_entry_hierarchy = 0);
+    multiple_scattering::MoliereDiagnostics GetMoliereDiagnostics() const
+    { return moliere_diagnostics_; }
+    const std::string& GetLastTerminationReason() const
+    { return last_termination_reason_; }
     enum { GEOMETRY, UTILITY, DENSITY_DISTR };
 
 private:
@@ -36,7 +42,8 @@ private:
     int AdvanceParticle(ParticleState& p_cond, const double E_f,
                         const double max_distance, std::function<double()> rnd,
                         Sector& current_sector, bool min_energy_step,
-                        const double min_energy);
+                        const double min_energy, unsigned int hierarchy_condition,
+                        unsigned int stop_on_entry_hierarchy);
     double CalculateDistanceToBorder(const Vector3D& particle_position,
         const Vector3D& particle_direction, const Geometry& current_geometry);
     int maximize(const std::array<double, 3>& InteractionEnergies);
@@ -80,10 +87,14 @@ private:
         InvalidStep = 0,
         ReachedInteraction = 1,
         ReachedMaxDistance = 2,
-        ReachedBorder = 3
+        ReachedBorder = 3,
+        ReachedHierarchyEntry = 4,
+        ReachedHierarchyExit = 5
     };
 
     std::vector<Sector> sector_list;
+    multiple_scattering::MoliereDiagnostics moliere_diagnostics_;
+    std::string last_termination_reason_ = "unknown";
 };
 
 } // namespace PROPOSAL

@@ -61,6 +61,7 @@ PYBIND11_MODULE(proposal, m)
     init_secondaries(m);
 
     m.attr("__version__") = getPROPOSALVersion();
+    m.attr("atmfcp_scattering_patch") = "moliere-charge-v1-entry-v1";
 
     py::class_<Vector3D, std::shared_ptr<Vector3D>>(m, "Vector3D")
         .def("__str__", &py_print<Vector3D>)
@@ -457,7 +458,10 @@ PYBIND11_MODULE(proposal, m)
             py::arg("particle_def"), py::arg("path_to_config_file"))
         .def("propagate", &Propagator::Propagate, py::arg("initial_particle"),
             py::arg("max_distance") = 1.e20, py::arg("min_energy") = 0.,
-            py::arg("hierarchy_condition") = 0);
+            py::arg("hierarchy_condition") = 0,
+            py::arg("stop_on_entry_hierarchy") = 0)
+        .def_property_readonly("moliere_diagnostics", &Propagator::GetMoliereDiagnostics)
+        .def_property_readonly("last_termination_reason", &Propagator::GetLastTerminationReason);
 
     /* py::class_<PropagatorService, std::shared_ptr<PropagatorService>>( */
     /*     m, "PropagatorService") */

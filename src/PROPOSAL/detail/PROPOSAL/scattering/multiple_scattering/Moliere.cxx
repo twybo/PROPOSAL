@@ -12,7 +12,14 @@
 
 using namespace PROPOSAL::multiple_scattering;
 
+thread_local MoliereDiagnostics Moliere::diagnostics_;
+
 double Moliere::GetPrefactor(double ei, double grammage) {
+    ++diagnostics_.evaluations;
+    std::fill(B_.begin(), B_.end(), std::numeric_limits<double>::quiet_NaN());
+    const double charge_sq = projectile_charge_ * projectile_charge_;
+    if (charge_sq == 0.)
+        return 0.;
     double momentum_Sq = (ei - mass) * (ei + mass);
     double beta_Sq = 1. / (1. + mass * mass / momentum_Sq); // beta^2 = (v/c)^2
 
@@ -30,13 +37,13 @@ double Moliere::GetPrefactor(double ei, double grammage) {
         chi_0 = ME * ALPHA * std::pow(Zi_[i] * 128. / (9. * PI * PI), 1. / 3.);
         // Calculate Chi_a^2
         chi_A_Sq[i] = chi_0 * chi_0 / momentum_Sq
-                      * (1.13 + 3.76 * ALPHA * ALPHA * Zi_[i] * Zi_[i] / beta_Sq);
+                      * (1.13 + 3.76 * ALPHA * ALPHA * Zi_[i] * Zi_[i] * charge_sq / beta_Sq);
     }
 
     // Calculate Chi_c^2
     chiCSq_ = ((4. * PI * NA * ALPHA * ALPHA * HBAR * HBAR * SPEED * SPEED)
                * (grammage) / beta_p_Sq)
-              * ZSq_A_average_;
+              * ZSq_A_average_ * charge_sq;
 
     // Calculate B
 
@@ -46,8 +53,12 @@ double Moliere::GetPrefactor(double ei, double grammage) {
         double xn = 15.;
 
         for (int n = 0; n < 6; n++) {
-            if (xn < 0)
+            if (xn < 0) {
+                B_[i] = xn;
+                ++diagnostics_.below_cutoff;
+                diagnostics_.minimum_b = std::min(diagnostics_.minimum_b, xn);
                 return 0; // xn would become nan for further iterations
+            }
             xn = xn
                  * ((1. - std::log(xn) - std::log(chiCSq_ / chi_A_Sq[i]) - 1.
                      + 2. * EULER_MASCHERONI)
@@ -56,7 +67,14 @@ double Moliere::GetPrefactor(double ei, double grammage) {
 
         //  Check for inappropriate values of B. If B < 4.5 it is practical to
         //  assume no deviation.
-        if ((xn < 4.5) || xn != xn) {
+        B_[i] = xn;
+        if (std::isfinite(xn))
+            diagnostics_.minimum_b = std::min(diagnostics_.minimum_b, xn);
+        if ((xn < 4.5) || !std::isfinite(xn)) {
+            if (xn < 4.5)
+                ++diagnostics_.below_cutoff;
+            else
+                ++diagnostics_.nonfinite;
             return 0;
         }
 
@@ -127,6 +145,7 @@ double Moliere::CalculateScatteringAngle2D(double grammage, double ei, double ef
 Moliere::Moliere(const ParticleDef& particle_def, Medium const& medium)
     : Parametrization(particle_def.mass)
     , numComp_(medium.GetNumComponents())
+    , projectile_charge_(particle_def.charge)
     , ZSq_A_average_(0.0)
     , Zi_(numComp_)
     , weight_ZZ_(numComp_)
@@ -189,6 +208,8 @@ bool Moliere::compare(const Parametrization& scattering) const
     auto sc = dynamic_cast<const Moliere*>(&scattering);
 
     if (!sc)
+        return false;
+    else if (projectile_charge_ != sc->projectile_charge_)
         return false;
     else if (numComp_ != sc->numComp_)
         return false;

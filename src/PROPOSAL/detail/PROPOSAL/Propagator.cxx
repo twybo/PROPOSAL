@@ -56,8 +56,11 @@ Propagator::Propagator(const ParticleDef& p_def, const nlohmann::json& config)
 }
 
 Secondaries Propagator::Propagate(const ParticleState& initial_particle,
-    double max_distance, double min_energy, unsigned int hierarchy_condition)
+    double max_distance, double min_energy, unsigned int hierarchy_condition,
+    unsigned int stop_on_entry_hierarchy)
 {
+    multiple_scattering::Moliere::ResetDiagnostics();
+    last_termination_reason_ = "unknown";
     Secondaries track(std::make_shared<ParticleDef>(p_def), sector_list);
 
     track.push_back(initial_particle, InteractionType::ContinuousEnergyLoss);
@@ -89,7 +92,8 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
         advancement_type = AdvanceParticle(
                 state, energy_at_next_interaction, max_distance, rnd,
                 current_sector, next_interaction_type == MinimalE,
-                InteractionEnergy[MinimalE]);
+                InteractionEnergy[MinimalE], hierarchy_condition,
+                stop_on_entry_hierarchy);
 
         // If the particle is on the sector border before the continuous step is
         // performed in 'AdvanceParticle', we might enter a different sector due
@@ -106,17 +110,21 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                 auto loss = DoStochasticInteraction(state, utility, rnd);
                 if (loss.type != InteractionType::Undefined)
                     track.push_back(state, loss.type, loss.comp_hash);
-                if (state.energy <= InteractionEnergy[MinimalE])
+                if (state.energy <= InteractionEnergy[MinimalE]) {
                     continue_propagation = false;
+                    last_termination_reason_ = "energy";
+                }
                 break;
             }
             case Decay: {
                 track.push_back(state, InteractionType::Decay);
                 continue_propagation = false;
+                last_termination_reason_ = "decay";
                 break;
             }
             case MinimalE: {
                 continue_propagation = false;
+                last_termination_reason_ = "energy";
                 break;
             }
             }
@@ -126,15 +134,33 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
             current_sector = GetCurrentSector(state.position, state.direction);
             auto hierarchy_f = get<GEOMETRY>(current_sector)->GetHierarchy();
             if (hierarchy_i > hierarchy_condition
-                && hierarchy_f < hierarchy_condition)
+                && hierarchy_f < hierarchy_condition) {
                 continue_propagation = false;
+                last_termination_reason_ = "exit";
+            }
+            if (stop_on_entry_hierarchy != 0
+                && hierarchy_i < stop_on_entry_hierarchy
+                && hierarchy_f >= stop_on_entry_hierarchy) {
+                continue_propagation = false;
+                last_termination_reason_ = "entry";
+            }
             break;
         }
         case ReachedMaxDistance:
             continue_propagation = false;
+            last_termination_reason_ = "max_distance";
+            break;
+        case ReachedHierarchyEntry:
+            continue_propagation = false;
+            last_termination_reason_ = "entry";
+            break;
+        case ReachedHierarchyExit:
+            continue_propagation = false;
+            last_termination_reason_ = "exit";
             break;
         }
     }
+    moliere_diagnostics_ = multiple_scattering::Moliere::GetDiagnostics();
     return track;
 }
 
@@ -153,7 +179,8 @@ Interaction::Loss Propagator::DoStochasticInteraction(ParticleState& p_cond,
 int Propagator::AdvanceParticle(ParticleState &state,
     const double energy_next_interaction, const double final_distance,
     std::function<double()> rnd_generator, Sector& current_sector,
-    bool min_energy_step, const double min_energy) {
+    bool min_energy_step, const double min_energy,
+    unsigned int hierarchy_condition, unsigned int stop_on_entry_hierarchy) {
 
     auto& utility = get<UTILITY>(current_sector);
     auto& density = get<DENSITY_DISTR>(current_sector);
@@ -250,6 +277,19 @@ int Propagator::AdvanceParticle(ParticleState &state,
             energy = utility.EnergyDistance(state.energy, grammage);
             advancement_type = ReachedBorder;
         } else if (!is_inside) {
+            const auto hierarchy_i = geometry->GetHierarchy();
+            const auto tangent_sector = GetCurrentSector(state.position, new_direction);
+            const auto hierarchy_f = get<GEOMETRY>(tangent_sector)->GetHierarchy();
+            if (hierarchy_i > hierarchy_condition && hierarchy_f < hierarchy_condition) {
+                state.direction = new_direction;
+                return ReachedHierarchyExit;
+            }
+            if (stop_on_entry_hierarchy != 0
+                && hierarchy_i < stop_on_entry_hierarchy
+                && hierarchy_f >= stop_on_entry_hierarchy) {
+                state.direction = new_direction;
+                return ReachedHierarchyEntry;
+            }
             // Special case: We are on the sector border, but scattering back outside the current sector!
             // Update sector and recalculate values
             advancement_type = InvalidStep;

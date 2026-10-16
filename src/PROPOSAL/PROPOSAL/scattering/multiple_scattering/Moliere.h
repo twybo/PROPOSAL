@@ -30,6 +30,7 @@
 
 #include <array>
 #include <vector>
+#include <limits>
 
 #include "PROPOSAL/medium/Medium.h"
 #include "PROPOSAL/scattering/multiple_scattering/Parametrization.h"
@@ -41,11 +42,19 @@ struct ParticleDef;
 
 namespace multiple_scattering {
 
+    struct MoliereDiagnostics {
+        unsigned long evaluations = 0;
+        unsigned long below_cutoff = 0;
+        unsigned long nonfinite = 0;
+        double minimum_b = std::numeric_limits<double>::infinity();
+    };
+
     class Moliere : public Parametrization {
         bool compare(const Parametrization&) const override;
         void print(std::ostream&) const override;
 
         int numComp_; // number of components in medium
+        double projectile_charge_;
         double ZSq_A_average_;
         std::vector<double> Zi_; // nuclear charge of different components
         std::vector<double>
@@ -58,6 +67,7 @@ namespace multiple_scattering {
         // scattering parameters
         double chiCSq_; // characteristic angle² in rad²
         std::vector<double> B_;
+        static thread_local MoliereDiagnostics diagnostics_;
 
         double f(double theta);
         double F(double theta);
@@ -74,6 +84,11 @@ namespace multiple_scattering {
     public:
         // constructor
         Moliere(const ParticleDef&, Medium const&);
+
+        double GetProjectileCharge() const { return projectile_charge_; }
+        const std::vector<double>& GetLastB() const { return B_; }
+        static MoliereDiagnostics GetDiagnostics() { return diagnostics_; }
+        static void ResetDiagnostics() { diagnostics_ = MoliereDiagnostics(); }
 
         ScatteringOffset CalculateRandomAngle(double grammage, double ei,
             double ef, const std::array<double, 4>& rnd) override;

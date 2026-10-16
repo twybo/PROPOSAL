@@ -16,6 +16,14 @@ void init_scattering(py::module& m)
 {
     py::module m_sub = m.def_submodule("scattering");
 
+    py::class_<multiple_scattering::MoliereDiagnostics>(m_sub, "MoliereDiagnostics")
+        .def_readonly("evaluations", &multiple_scattering::MoliereDiagnostics::evaluations)
+        .def_readonly("below_cutoff", &multiple_scattering::MoliereDiagnostics::below_cutoff)
+        .def_readonly("nonfinite", &multiple_scattering::MoliereDiagnostics::nonfinite)
+        .def_readonly("minimum_b", &multiple_scattering::MoliereDiagnostics::minimum_b);
+    m_sub.def("get_moliere_diagnostics", &multiple_scattering::Moliere::GetDiagnostics);
+    m_sub.def("reset_moliere_diagnostics", &multiple_scattering::Moliere::ResetDiagnostics);
+
     py::class_<multiple_scattering::Parametrization,
         std::shared_ptr<multiple_scattering::Parametrization>>(
         m_sub, "MultipleScattering")
@@ -60,7 +68,11 @@ void init_scattering(py::module& m)
                     e_f(double): final energy
                     rnd1(double): random number 1
                     rnd2(double): random number 2
-            )pbdoc");
+            )pbdoc")
+        .def("clone", [](const multiple_scattering::Parametrization& model) {
+            return std::shared_ptr<multiple_scattering::Parametrization>(model.clone());
+        })
+        .def("__eq__", &multiple_scattering::Parametrization::operator==);
 
     py::class_<multiple_scattering::Highland, multiple_scattering::Parametrization,
         std::shared_ptr<multiple_scattering::Highland>>(m_sub, "Highland")
@@ -84,7 +96,9 @@ void init_scattering(py::module& m)
     py::class_<multiple_scattering::Moliere, multiple_scattering::Parametrization,
             std::shared_ptr<multiple_scattering::Moliere>>(m_sub, "Moliere")
             .def(py::init<const ParticleDef&, const Medium&>(),
-                 py::arg("particle_def"), py::arg("medium"));
+                 py::arg("particle_def"), py::arg("medium"))
+            .def_property_readonly("projectile_charge", &multiple_scattering::Moliere::GetProjectileCharge)
+            .def_property_readonly("last_b", &multiple_scattering::Moliere::GetLastB);
 
     py::class_<multiple_scattering::MoliereInterpol, multiple_scattering::Moliere,
             std::shared_ptr<multiple_scattering::MoliereInterpol>>(m_sub, "MoliereInterpol")
