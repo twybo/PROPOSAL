@@ -49,5 +49,6 @@ public:
     virtual double MeanFreePath(double) = 0;
 
     auto GetHash() const noexcept { return hash; }
+    const crosssection_list_t& GetCrossSections() const { return cross_list; }
 };
 } // namespace PROPOSAL

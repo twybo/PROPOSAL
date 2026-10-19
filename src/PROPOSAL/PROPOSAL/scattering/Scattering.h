@@ -83,6 +83,9 @@ protected:
 
 public:
     Scattering() = default;
+    virtual std::shared_ptr<Coulomb> GetCoulomb() const {
+        return m_scatter_ptr ? m_scatter_ptr->GetCoulomb() : nullptr;
+    }
     virtual ~Scattering() = default;
 
     /**

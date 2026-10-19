@@ -461,6 +461,7 @@ PYBIND11_MODULE(proposal, m)
             py::arg("hierarchy_condition") = 0,
             py::arg("stop_on_entry_hierarchy") = 0)
         .def_property_readonly("moliere_diagnostics", &Propagator::GetMoliereDiagnostics)
+        .def_property_readonly("transport_result", &Propagator::GetTransportResult)
         .def_property_readonly("last_termination_reason", &Propagator::GetLastTerminationReason);
 
     /* py::class_<PropagatorService, std::shared_ptr<PropagatorService>>( */

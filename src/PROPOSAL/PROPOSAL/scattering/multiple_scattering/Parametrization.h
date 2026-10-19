@@ -32,6 +32,7 @@
 #include <utility>
 
 namespace PROPOSAL {
+class Coulomb;
 namespace multiple_scattering {
     struct ScatteringOffset {
         ScatteringOffset() : sx(0.), sy(0.), tx(0.), ty(0.) {};
@@ -56,6 +57,7 @@ namespace multiple_scattering {
         Parametrization() = default;
         Parametrization(double mass);
         virtual ~Parametrization() = default;
+        virtual std::shared_ptr<Coulomb> GetCoulomb() { return nullptr; }
 
         virtual std::unique_ptr<Parametrization> clone() const = 0;
 

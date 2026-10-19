@@ -2,6 +2,7 @@
 #include "PROPOSAL/Logging.h"
 #include "PROPOSAL/Secondaries.h"
 #include "PROPOSAL/crosssection/CrossSection.h"
+#include "PROPOSAL/crosssection/CrossSectionMultiplier.h"
 #include "PROPOSAL/crosssection/Factories/AnnihilationFactory.h"
 #include "PROPOSAL/crosssection/Factories/BremsstrahlungFactory.h"
 #include "PROPOSAL/crosssection/Factories/ComptonFactory.h"
@@ -17,6 +18,9 @@
 #include "PROPOSAL/crosssection/ParticleDefaultCrossSectionList.h"
 #include "PROPOSAL/density_distr/density_distr.h"
 #include "PROPOSAL/geometry/GeometryFactory.h"
+#include "PROPOSAL/geometry/Sphere.h"
+#include "PROPOSAL/geometry/Box.h"
+#include "PROPOSAL/geometry/Cylinder.h"
 #include "PROPOSAL/math/RandomGenerator.h"
 #include "PROPOSAL/medium/MediumFactory.h"
 #include "PROPOSAL/particle/ParticleDef.h"
@@ -61,10 +65,14 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
 {
     multiple_scattering::Moliere::ResetDiagnostics();
     last_termination_reason_ = "unknown";
+    transport_result_ = CoulombTransportResult();
     Secondaries track(std::make_shared<ParticleDef>(p_def), sector_list);
 
     track.push_back(initial_particle, InteractionType::ContinuousEnergyLoss);
     auto state = ParticleState(initial_particle);
+    if (!std::isfinite(state.direction.magnitude()) || state.direction.magnitude() == 0.)
+        throw std::invalid_argument("Propagation requires a finite nonzero direction");
+    state.direction.normalize();
 
     auto current_sector = GetCurrentSector(state.position, state.direction);
     auto rnd
@@ -80,10 +88,30 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
 
         InteractionEnergy[MinimalE] = std::max(
                 min_energy, utility.collection.displacement_calc->GetLowerLim());
-        InteractionEnergy[Decay] = utility.EnergyDecay(
-            state.energy, rnd, density->Evaluate(state.position));
-        InteractionEnergy[Stochastic]
-            = utility.EnergyInteraction(state.energy, rnd);
+        if (utility.collection.scattering && utility.collection.scattering->GetCoulomb()) {
+            InteractionEnergy[MinimalE] = std::max(InteractionEnergy[MinimalE], p_def.mass+0.2);
+            if (state.energy <= InteractionEnergy[MinimalE]) {
+                last_termination_reason_ = min_energy >= p_def.mass+0.2 ? "energy" : "applicability_limit";
+                break;
+            }
+        }
+        if (utility.collection.scattering && utility.collection.scattering->GetCoulomb()) {
+            double stopping = 0., rate = 0.;
+            for (const auto& cross : utility.collection.interaction_calc->GetCrossSections()) {
+                stopping += cross->CalculatedEdx(state.energy);
+                rate += cross->CalculatedNdx(state.energy);
+            }
+            InteractionEnergy[Stochastic] = rate > 0.
+                ? state.energy+std::log(std::max(rnd(),std::numeric_limits<double>::min()))*stopping/rate : -INF;
+            const double momentum = std::sqrt((state.energy-p_def.mass)*(state.energy+p_def.mass));
+            InteractionEnergy[Decay] = utility.collection.decay_calc && std::isfinite(p_def.lifetime) && p_def.lifetime > 0.
+                ? state.energy+std::log(std::max(rnd(),std::numeric_limits<double>::min()))
+                    *p_def.lifetime*SPEED*momentum/p_def.mass*density->Evaluate(state.position)*stopping : -INF;
+        } else {
+            InteractionEnergy[Decay] = utility.EnergyDecay(
+                state.energy, rnd, density->Evaluate(state.position));
+            InteractionEnergy[Stochastic] = utility.EnergyInteraction(state.energy, rnd);
+        }
 
         auto next_interaction_type = maximize(InteractionEnergy);
         auto energy_at_next_interaction
@@ -104,6 +132,12 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
         track.push_back(state, InteractionType::ContinuousEnergyLoss);
 
         switch (advancement_type) {
+        case ReachedCoulombStep:
+            if (state.energy <= InteractionEnergy[MinimalE]) {
+                continue_propagation = false;
+                last_termination_reason_ = "energy";
+            }
+            break;
         case ReachedInteraction:
             switch (next_interaction_type) {
             case Stochastic: {
@@ -112,7 +146,7 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                     track.push_back(state, loss.type, loss.comp_hash);
                 if (state.energy <= InteractionEnergy[MinimalE]) {
                     continue_propagation = false;
-                    last_termination_reason_ = "energy";
+                    last_termination_reason_ = loss.type == InteractionType::Annihilation ? "annihilation" : "energy";
                 }
                 break;
             }
@@ -160,6 +194,11 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
             break;
         }
     }
+    if (last_termination_reason_ == "energy" && min_energy < p_def.mass+0.2
+        && get<UTILITY>(current_sector).collection.scattering
+        && get<UTILITY>(current_sector).collection.scattering->GetCoulomb()
+        && state.energy <= p_def.mass+0.2)
+        last_termination_reason_ = "applicability_limit";
     moliere_diagnostics_ = multiple_scattering::Moliere::GetDiagnostics();
     return track;
 }
@@ -168,10 +207,33 @@ Interaction::Loss Propagator::DoStochasticInteraction(ParticleState& p_cond,
     PropagationUtility& utility, std::function<double()> rnd)
 {
     auto loss = utility.EnergyStochasticloss(p_cond.energy, rnd());
-
-    p_cond.direction = utility.DirectionDeflect(loss.type, p_cond.energy,
-        p_cond.energy * (1. - loss.v_loss), p_cond.direction, rnd, loss.comp_hash);
+    const auto before = p_cond;
+    auto model = utility.collection.scattering ? utility.collection.scattering->GetCoulomb() : nullptr;
+    if (model && loss.type == InteractionType::Ioniz) {
+        const double ef = p_cond.energy*(1.-loss.v_loss);
+        const double pi = std::sqrt((p_cond.energy-p_def.mass)*(p_cond.energy+p_def.mass));
+        const double pf = std::sqrt(std::max(0., (ef-p_def.mass)*(ef+p_def.mass)));
+        if (pf > 0.) {
+            const double cosine = (pi*pi-(p_cond.energy+ME)*(p_cond.energy-ef))/(pi*pf);
+            p_cond.direction = Coulomb::Rotate(p_cond.direction,
+                std::acos(std::max(-1.,std::min(1.,cosine))),2*PI*rnd());
+        }
+    } else {
+        p_cond.direction = utility.DirectionDeflect(loss.type, p_cond.energy,
+            p_cond.energy * (1. - loss.v_loss), p_cond.direction, rnd, loss.comp_hash);
+    }
     p_cond.energy = p_cond.energy * (1. - loss.v_loss);
+    if (model && loss.type == InteractionType::Ioniz) {
+        CoulombCollision collision;
+        collision.before = before;
+        collision.after = p_cond;
+        collision.component = loss.comp_hash;
+        collision.recoil = before.energy-p_cond.energy;
+        collision.electron = true;
+        transport_result_.collisions.push_back(collision);
+        ++transport_result_.diagnostics.collisions;
+        ++transport_result_.diagnostics.electron_collisions;
+    }
 
     return loss;
 }
@@ -185,6 +247,9 @@ int Propagator::AdvanceParticle(ParticleState &state,
     auto& utility = get<UTILITY>(current_sector);
     auto& density = get<DENSITY_DISTR>(current_sector);
     auto& geometry = get<GEOMETRY>(current_sector);
+    if (utility.collection.scattering && utility.collection.scattering->GetCoulomb())
+        return AdvanceCoulomb(state, energy_next_interaction, final_distance,
+            rnd_generator, current_sector, min_energy_step, min_energy);
 
     double energy = energy_next_interaction; // final energy of proposed step
     double grammage = -1; // grammage of proposed step
@@ -345,16 +410,19 @@ int Propagator::AdvanceParticle(ParticleState &state,
 double Propagator::CalculateDistanceToBorder(const Vector3D& position,
     const Vector3D& direction, const Geometry& current_geometry)
 {
-    auto distance_border
-        = current_geometry.DistanceToBorder(position, direction).first;
+    const double tolerance = std::max(4*GEOMETRY_PRECISION,
+        64*std::numeric_limits<double>::epsilon()*std::max(1.,position.magnitude()));
+    const auto probe = Cartesian3D(position)+tolerance*Cartesian3D(direction);
+    auto distance_border = current_geometry.DistanceToBorder(probe, direction).first;
+    distance_border = distance_border < 0. ? INF : distance_border+tolerance;
     double tmp_distance;
     for (auto& sector : sector_list) {
         auto& geometry = get<GEOMETRY>(sector);
         if (geometry->GetHierarchy() > current_geometry.GetHierarchy()) {
             tmp_distance
-                = geometry->DistanceToBorder(position, direction).first;
+                = geometry->DistanceToBorder(probe, direction).first;
             if (tmp_distance >= 0)
-                distance_border = std::min(distance_border, tmp_distance);
+                distance_border = std::min(distance_border, tmp_distance+tolerance);
         }
     }
     return distance_border;
@@ -378,8 +446,11 @@ Sector Propagator::GetCurrentSector(
     const Vector3D& position, const Vector3D& direction)
 {
     auto potential_sec = std::vector<Sector*> {};
+    const double tolerance = std::max(4*GEOMETRY_PRECISION,
+        64*std::numeric_limits<double>::epsilon()*std::max(1.,position.magnitude()));
+    const auto probe = Cartesian3D(position)+tolerance*Cartesian3D(direction);
     for (auto& sector : sector_list) {
-        if (get<GEOMETRY>(sector)->IsInside(position, direction))
+        if (get<GEOMETRY>(sector)->IsInside(probe, direction))
             potential_sec.push_back(&sector);
     }
 
@@ -390,6 +461,8 @@ Sector Propagator::GetCurrentSector(
                                                       spherical_position.GetY(),
                                                       spherical_position.GetZ());
     }
+    if (potential_sec.empty())
+        throw std::out_of_range("No sector contains the particle's forward tangent");
     auto highest_sector_iter = std::max_element(
         potential_sec.begin(), potential_sec.end(), [](Sector* a, Sector* b) {
             return get<GEOMETRY>(*a)->GetHierarchy()
@@ -491,6 +564,23 @@ PropagationUtility::Collection Propagator::CreateUtility(
     bool do_exact_time, nlohmann::json scatter)
 {
     PropagationUtility::Collection def;
+    // The same tightened ionization partition feeds interactions, stopping,
+    // continuous fluctuations, time and Coulomb electron deflection.
+    std::string scattering_name = scatter.value("multiple_scattering", "");
+    std::transform(scattering_name.begin(), scattering_name.end(), scattering_name.begin(), ::tolower);
+    if (scattering_name == "moliere" || scattering_name == "moliereinterpol" || scattering_name == "coulombdirect") {
+        for (auto& cross : crosss) {
+            if (cross->GetInteractionType() != InteractionType::Ioniz) continue;
+            const auto old = cross->GetEnergyCutSettings();
+            double ecut = old->GetEcut();
+            if (ecut < 0. || ecut > 0.001) ecut = 0.001;
+            auto cuts = std::make_shared<EnergyCutSettings>(ecut, old->GetVcut(), old->GetContRand());
+            auto scaled = dynamic_cast<CrossSectionMultiplier*>(cross.get());
+            const double multiplier = scaled ? scaled->GetMultiplier() : 1.;
+            cross = make_ionization(p_def, *medium, cuts, do_interpol,
+                {{"parametrization", cross->GetParametrizationName()}, {"multiplier", multiplier}});
+        }
+    }
     def.displacement_calc = make_displacement(crosss, do_interpol);
     def.interaction_calc
         = make_interaction(def.displacement_calc, crosss, do_interpol, false);

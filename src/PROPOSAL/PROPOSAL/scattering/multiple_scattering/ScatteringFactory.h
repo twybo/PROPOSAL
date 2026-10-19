@@ -52,7 +52,9 @@ enum class MultipleScatteringType : int {
     Moliere,
     Highland,
     HighlandIntegral,
-    MoliereInterpol
+    MoliereInterpol,
+    MoliereLegacy,
+    CoulombDirect
 };
 
 static const std::unordered_map<std::string, MultipleScatteringType>
@@ -60,7 +62,9 @@ static const std::unordered_map<std::string, MultipleScatteringType>
         { "highland", MultipleScatteringType::Highland },
         { "highlandintegral", MultipleScatteringType::HighlandIntegral },
         { "noscattering", MultipleScatteringType::NoScattering },
-        { "moliereinterpol", MultipleScatteringType::MoliereInterpol }};
+        { "moliereinterpol", MultipleScatteringType::MoliereInterpol },
+        { "molierelegacy", MultipleScatteringType::MoliereLegacy },
+        { "coulombdirect", MultipleScatteringType::CoulombDirect }};
 
 inline auto make_multiple_scattering(
     MultipleScatteringType t, ParticleDef const& p, Medium const& m)
@@ -70,6 +74,10 @@ inline auto make_multiple_scattering(
         return make_highland(p, m);
     case MultipleScatteringType::Moliere:
         return make_moliere(p, m);
+    case MultipleScatteringType::MoliereLegacy:
+        return std::unique_ptr<multiple_scattering::Parametrization>(new multiple_scattering::MoliereLegacy(p,m));
+    case MultipleScatteringType::CoulombDirect:
+        return std::unique_ptr<multiple_scattering::Parametrization>(new multiple_scattering::CoulombDirect(p,m));
     case MultipleScatteringType::MoliereInterpol:
          return make_moliereinterpol(p, m);
     case MultipleScatteringType::NoScattering:

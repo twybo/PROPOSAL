@@ -34,9 +34,12 @@ public:
     { return moliere_diagnostics_; }
     const std::string& GetLastTerminationReason() const
     { return last_termination_reason_; }
+    const CoulombTransportResult& GetTransportResult() const { return transport_result_; }
     enum { GEOMETRY, UTILITY, DENSITY_DISTR };
 
 private:
+    int AdvanceCoulomb(ParticleState&, double, double, std::function<double()>,
+        Sector&, bool, double);
     Interaction::Loss DoStochasticInteraction(
         ParticleState&, PropagationUtility&, std::function<double()>);
     int AdvanceParticle(ParticleState& p_cond, const double E_f,
@@ -89,12 +92,14 @@ private:
         ReachedMaxDistance = 2,
         ReachedBorder = 3,
         ReachedHierarchyEntry = 4,
-        ReachedHierarchyExit = 5
+        ReachedHierarchyExit = 5,
+        ReachedCoulombStep = 6
     };
 
     std::vector<Sector> sector_list;
     multiple_scattering::MoliereDiagnostics moliere_diagnostics_;
     std::string last_termination_reason_ = "unknown";
+    CoulombTransportResult transport_result_;
 };
 
 } // namespace PROPOSAL

@@ -3,6 +3,7 @@
 namespace PROPOSAL {
     struct CrossSectionMultiplier : public CrossSectionBase {
         CrossSectionMultiplier(std::shared_ptr<CrossSectionBase> cross, double multiplier) : CrossSectionBase(), cross_(cross), multiplier_(multiplier) {}
+        double GetMultiplier() const { return multiplier_; }
 
         double CalculatedEdx(double energy) override {
             return multiplier_ * cross_->CalculatedEdx(energy);

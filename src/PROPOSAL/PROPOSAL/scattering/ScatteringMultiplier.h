@@ -31,6 +31,12 @@ class ScatteringMultiplier : public Scattering {
     }
 
 public:
+    std::shared_ptr<Coulomb> GetCoulomb() const override {
+        auto model = Scattering::GetCoulomb();
+        if (model && multiple_scatt != 1.)
+            throw std::invalid_argument("Coulomb transport requires physical charge rather than an angular multiplier");
+        return model;
+    }
     /**
      * @brief A wrapper class for handling with scattering multiplier.
      * Multiplier are linear factors for scattering angles.

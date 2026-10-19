@@ -20,6 +20,25 @@ std::unique_ptr<Scattering> make_scattering(const nlohmann::json& config,
         ms_pointer = make_multiple_scattering(config["multiple_scattering"].get<std::string>(),
                                               p_def, medium, cross, interpol);
     double ms_multiplier = config.value("multiple_scattering_multiplier", 1.0);
+    if (ms_pointer && ms_pointer->GetCoulomb()) {
+        if (ms_multiplier != 1.)
+            throw std::invalid_argument("Coulomb transport requires physical projectile charge, not angular multipliers");
+        auto model = ms_pointer->GetCoulomb();
+        if (config.contains("coulomb")) {
+            const auto& c = config.at("coulomb");
+            const auto mode = c.value("mode", model->settings.mode == CoulombMode::Direct ? "direct" : "mixed");
+            if (mode != "direct" && mode != "mixed")
+                throw std::invalid_argument("Coulomb mode must be direct or mixed");
+            model->settings.mode = mode == "direct" ? CoulombMode::Direct : CoulombMode::Mixed;
+            model->settings.separation = c.value("separation", model->settings.separation);
+            model->settings.max_angular_variance = c.value("max_angular_variance", model->settings.max_angular_variance);
+            model->settings.max_fractional_loss = c.value("max_fractional_loss", model->settings.max_fractional_loss);
+            model->settings.max_step = c.value("max_step", model->settings.max_step);
+            model->settings.Validate();
+            if (c.value("model", Coulomb::ModelIdentity()) != Coulomb::ModelIdentity())
+                throw std::invalid_argument("Unknown Coulomb physical model identity");
+        }
+    }
 
     std::vector<std::unique_ptr<stochastic_deflection::Parametrization>> sd = {};
     if (config.contains("stochastic_deflection")) {

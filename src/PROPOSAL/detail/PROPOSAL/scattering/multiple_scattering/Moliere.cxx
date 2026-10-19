@@ -144,6 +144,8 @@ double Moliere::CalculateScatteringAngle2D(double grammage, double ei, double ef
 
 Moliere::Moliere(const ParticleDef& particle_def, Medium const& medium)
     : Parametrization(particle_def.mass)
+    , transport_particle_(particle_def)
+    , transport_medium_(medium)
     , numComp_(medium.GetNumComponents())
     , projectile_charge_(particle_def.charge)
     , ZSq_A_average_(0.0)
@@ -435,6 +437,7 @@ double Moliere::GetRandom(double pre_factor, double rnd)
 }
 
 MoliereInterpol::MoliereInterpol(const ParticleDef& p_def, const Medium& medium) : Moliere(p_def, medium) {
+    GetCoulomb()->settings.interpolate = true;
     // initialize interpolation tables
     Logging::Get("proposal.scattering")->debug("Initialize interpooation tables for MoliereInterpol.");
 

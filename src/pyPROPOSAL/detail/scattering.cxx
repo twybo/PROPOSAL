@@ -16,6 +16,58 @@ void init_scattering(py::module& m)
 {
     py::module m_sub = m.def_submodule("scattering");
 
+    py::enum_<CoulombMode>(m_sub, "CoulombMode")
+        .value("Direct", CoulombMode::Direct).value("Mixed", CoulombMode::Mixed);
+    py::class_<CoulombSettings>(m_sub, "CoulombSettings")
+        .def(py::init<>())
+        .def_readwrite("mode", &CoulombSettings::mode)
+        .def_readwrite("separation", &CoulombSettings::separation)
+        .def_readwrite("max_angular_variance", &CoulombSettings::max_angular_variance)
+        .def_readwrite("max_fractional_loss", &CoulombSettings::max_fractional_loss)
+        .def_readwrite("max_step", &CoulombSettings::max_step)
+        .def_readwrite("interpolate", &CoulombSettings::interpolate);
+    py::class_<CoulombMoments>(m_sub, "CoulombMoments")
+        .def_readonly("rate", &CoulombMoments::rate)
+        .def_readonly("angular", &CoulombMoments::angular)
+        .def_readonly("stopping", &CoulombMoments::stopping)
+        .def_readonly("straggling", &CoulombMoments::straggling);
+    py::class_<CoulombCollision>(m_sub, "CoulombCollision")
+        .def_readonly("before", &CoulombCollision::before)
+        .def_readonly("after", &CoulombCollision::after)
+        .def_readonly("component", &CoulombCollision::component)
+        .def_readonly("x", &CoulombCollision::x)
+        .def_readonly("electron", &CoulombCollision::electron)
+        .def_readonly("recoil", &CoulombCollision::recoil);
+    py::class_<TransportSegment>(m_sub, "TransportSegment")
+        .def_readonly("before", &TransportSegment::before)
+        .def_readonly("after", &TransportSegment::after)
+        .def_readonly("length", &TransportSegment::length)
+        .def_readonly("grammage", &TransportSegment::grammage);
+    py::class_<CoulombDiagnostics>(m_sub, "CoulombDiagnostics")
+        .def_readonly("collisions", &CoulombDiagnostics::collisions)
+        .def_readonly("electron_collisions", &CoulombDiagnostics::electron_collisions)
+        .def_readonly("soft_steps", &CoulombDiagnostics::soft_steps)
+        .def_readonly("applicability_failures", &CoulombDiagnostics::applicability_failures);
+    py::class_<CoulombTransportResult>(m_sub, "CoulombTransportResult")
+        .def_readonly("segments", &CoulombTransportResult::segments)
+        .def_readonly("collisions", &CoulombTransportResult::collisions)
+        .def_readonly("diagnostics", &CoulombTransportResult::diagnostics)
+        .def_readonly("mode", &CoulombTransportResult::mode)
+        .def_readonly("table", &CoulombTransportResult::table)
+        .def_readonly("model", &CoulombTransportResult::model);
+    py::class_<Coulomb, std::shared_ptr<Coulomb>>(m_sub, "Coulomb")
+        .def(py::init<const ParticleDef&, const Medium&, CoulombSettings>(),
+            py::arg("particle"), py::arg("medium"), py::arg("settings") = CoulombSettings())
+        .def_readwrite("settings", &Coulomb::settings)
+        .def_property_readonly_static("model_identity", [](py::object) { return Coulomb::ModelIdentity(); })
+        .def_property_readonly_static("table_identity", [](py::object) { return Coulomb::TableIdentity(); })
+        .def("differential", &Coulomb::Differential)
+        .def("moments", &Coulomb::Moments)
+        .def("electron_angular", &Coulomb::ElectronAngular)
+        .def("sample", &Coulomb::Sample)
+        .def("scatter", &Coulomb::Scatter)
+        .def_static("rotate", &Coulomb::Rotate);
+
     py::class_<multiple_scattering::MoliereDiagnostics>(m_sub, "MoliereDiagnostics")
         .def_readonly("evaluations", &multiple_scattering::MoliereDiagnostics::evaluations)
         .def_readonly("below_cutoff", &multiple_scattering::MoliereDiagnostics::below_cutoff)
@@ -27,6 +79,7 @@ void init_scattering(py::module& m)
     py::class_<multiple_scattering::Parametrization,
         std::shared_ptr<multiple_scattering::Parametrization>>(
         m_sub, "MultipleScattering")
+        .def_property_readonly("coulomb", &multiple_scattering::Parametrization::GetCoulomb)
         .def("scatter",
             &multiple_scattering::Parametrization::CalculateRandomAngle,
             py::arg("grammage"), py::arg("e_i"), py::arg("e_f"),
@@ -100,12 +153,19 @@ void init_scattering(py::module& m)
             .def_property_readonly("projectile_charge", &multiple_scattering::Moliere::GetProjectileCharge)
             .def_property_readonly("last_b", &multiple_scattering::Moliere::GetLastB);
 
+    py::class_<multiple_scattering::MoliereLegacy, multiple_scattering::Moliere,
+        std::shared_ptr<multiple_scattering::MoliereLegacy>>(m_sub, "MoliereLegacy")
+        .def(py::init<const ParticleDef&, const Medium&>());
+    py::class_<multiple_scattering::CoulombDirect, multiple_scattering::Moliere,
+        std::shared_ptr<multiple_scattering::CoulombDirect>>(m_sub, "CoulombDirect")
+        .def(py::init<const ParticleDef&, const Medium&>());
     py::class_<multiple_scattering::MoliereInterpol, multiple_scattering::Moliere,
             std::shared_ptr<multiple_scattering::MoliereInterpol>>(m_sub, "MoliereInterpol")
             .def(py::init<const ParticleDef&, const Medium&>(),
                  py::arg("particle_def"), py::arg("medium"));
 
     py::class_<multiple_scattering::ScatteringOffset>(m_sub, "scattering_offset")
+            .def(py::init<>())
             .def_readwrite("sx", &multiple_scattering::ScatteringOffset::sx)
             .def_readwrite("sy", &multiple_scattering::ScatteringOffset::sy)
             .def_readwrite("tx", &multiple_scattering::ScatteringOffset::tx)
@@ -194,6 +254,7 @@ void init_scattering(py::module& m)
     using multiple_scatter_t = multiple_scattering::Parametrization;
 
     py::class_<Scattering, std::shared_ptr<Scattering>>(m_sub, "Scattering")
+        .def_property_readonly("coulomb", &Scattering::GetCoulomb)
         .def(py::init([](multiple_scatter_t const& s, deflect_list_t const& d) {
             return std::make_shared<Scattering>(s, d);
         }),

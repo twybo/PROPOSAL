@@ -33,6 +33,7 @@
 #include <limits>
 
 #include "PROPOSAL/medium/Medium.h"
+#include "PROPOSAL/scattering/Coulomb.h"
 #include "PROPOSAL/scattering/multiple_scattering/Parametrization.h"
 #include "CubicInterpolation/CubicSplines.h"
 #include "CubicInterpolation/Interpolant.h"
@@ -50,6 +51,9 @@ namespace multiple_scattering {
     };
 
     class Moliere : public Parametrization {
+        ParticleDef transport_particle_;
+        Medium transport_medium_;
+        std::shared_ptr<Coulomb> transport_;
         bool compare(const Parametrization&) const override;
         void print(std::ostream&) const override;
 
@@ -84,6 +88,11 @@ namespace multiple_scattering {
     public:
         // constructor
         Moliere(const ParticleDef&, Medium const&);
+        std::shared_ptr<Coulomb> GetCoulomb() override {
+            if (!transport_)
+                transport_ = std::make_shared<Coulomb>(transport_particle_, transport_medium_);
+            return transport_;
+        }
 
         double GetProjectileCharge() const { return projectile_charge_; }
         const std::vector<double>& GetLastB() const { return B_; }
@@ -100,6 +109,25 @@ namespace multiple_scattering {
 
         double CalculateScatteringAngle(double grammage, double ei, double ef, double rnd) override;
         double CalculateScatteringAngle2D(double grammage, double ei, double ef, double rnd1, double rnd2) override;
+    };
+
+    class MoliereLegacy : public Moliere {
+    public:
+        using Moliere::Moliere;
+        std::shared_ptr<Coulomb> GetCoulomb() override { return nullptr; }
+        std::unique_ptr<Parametrization> clone() const override {
+            return std::make_unique<MoliereLegacy>(*this);
+        }
+    };
+
+    class CoulombDirect : public Moliere {
+    public:
+        CoulombDirect(const ParticleDef& p, const Medium& m) : Moliere(p,m) {
+            GetCoulomb()->settings.mode = CoulombMode::Direct;
+        }
+        std::unique_ptr<Parametrization> clone() const override {
+            return std::make_unique<CoulombDirect>(*this);
+        }
     };
 
     class MoliereInterpol : public Moliere {
