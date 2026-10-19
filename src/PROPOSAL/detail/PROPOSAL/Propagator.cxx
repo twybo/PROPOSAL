@@ -402,6 +402,13 @@ int Propagator::AdvanceParticle(ParticleState &state,
         }
     }
 
+    if (stop_on_invalid_scattering && advancement_type == ReachedBorder) {
+        const auto proposed_position = state.position + distance * mean_direction;
+        if (proposed_position.GetCartesianCoordinates()
+            == state.position.GetCartesianCoordinates())
+            return InvalidScattering;
+    }
+
     state.time = state.time + utility.TimeElapsed(state.energy, energy, grammage, density->Evaluate(state.position)); // TODO: should the energy passed here be the randomized energy or not?
     state.position = state.position + distance * mean_direction;
     state.direction = new_direction;
