@@ -44,7 +44,7 @@ namespace PROPOSAL {
             auto& ty = offsets.ty;
             if (!std::isfinite(sx) || !std::isfinite(sy) || !std::isfinite(tx)
                 || !std::isfinite(ty) || sx*sx+sy*sy > 1.+1e-14 || tx*tx+ty*ty > 1.+1e-14)
-                throw std::runtime_error("Legacy transverse scattering proposal lies outside the unit direction domain");
+                throw ScatteringDomainError("Legacy transverse scattering proposal lies outside the unit direction domain");
             auto sz = std::sqrt(std::max(1. - (sx * sx + sy * sy), 0.));
             auto tz = std::sqrt(std::max(1. - (tx * tx + ty * ty), 0.));
 

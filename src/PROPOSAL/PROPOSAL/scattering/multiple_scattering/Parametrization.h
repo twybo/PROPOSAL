@@ -29,11 +29,17 @@
 #pragma once
 #include "PROPOSAL/math/Vector3D.h"
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 namespace PROPOSAL {
 class Coulomb;
 namespace multiple_scattering {
+    class ScatteringDomainError : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
+
     struct ScatteringOffset {
         ScatteringOffset() : sx(0.), sy(0.), tx(0.), ty(0.) {};
         friend std::ostream& operator<<(std::ostream& os, const ScatteringOffset& offset) {

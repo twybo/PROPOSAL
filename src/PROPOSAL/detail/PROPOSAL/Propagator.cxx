@@ -30,12 +30,38 @@
 #include "PROPOSAL/propagation_utility/TimeBuilder.h"
 #include "PROPOSAL/scattering/ScatteringFactory.h"
 #include <fstream>
+#include <cmath>
 
 #include <iomanip>
 
 using namespace PROPOSAL;
 using std::get;
 using std::string;
+
+namespace {
+bool IsFiniteUnitDirection(const Vector3D& direction)
+{
+    for (const auto coordinate : direction.GetCartesianCoordinates()) {
+        if (!std::isfinite(coordinate))
+            return false;
+    }
+    return std::abs(direction.magnitude() - 1.) <= 5.e-12;
+}
+
+bool HasConsistentSphereCrossing(const Geometry& geometry,
+    const Vector3D& position, const Cartesian3D& mean_direction,
+    const Cartesian3D& new_direction)
+{
+    const auto* sphere = dynamic_cast<const Sphere*>(&geometry);
+    if (sphere == nullptr)
+        return true;
+    const auto normal = Cartesian3D(position) - sphere->GetPosition();
+    const auto mean_orientation = normal * mean_direction;
+    const auto final_orientation = normal * new_direction;
+    return (mean_orientation > 0 && final_orientation > 0)
+        || (mean_orientation < 0 && final_orientation < 0);
+}
+}
 
 Propagator::Propagator(const ParticleDef& p_def, std::vector<Sector> sectors)
     : p_def(p_def)
@@ -61,7 +87,7 @@ Propagator::Propagator(const ParticleDef& p_def, const nlohmann::json& config)
 
 Secondaries Propagator::Propagate(const ParticleState& initial_particle,
     double max_distance, double min_energy, unsigned int hierarchy_condition,
-    unsigned int stop_on_entry_hierarchy)
+    unsigned int stop_on_entry_hierarchy, bool stop_on_invalid_scattering)
 {
     multiple_scattering::Moliere::ResetDiagnostics();
     last_termination_reason_ = "unknown";
@@ -121,7 +147,12 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                 state, energy_at_next_interaction, max_distance, rnd,
                 current_sector, next_interaction_type == MinimalE,
                 InteractionEnergy[MinimalE], hierarchy_condition,
-                stop_on_entry_hierarchy);
+                stop_on_entry_hierarchy, stop_on_invalid_scattering);
+
+        if (advancement_type == InvalidScattering) {
+            last_termination_reason_ = "invalid_scattering";
+            break;
+        }
 
         // If the particle is on the sector border before the continuous step is
         // performed in 'AdvanceParticle', we might enter a different sector due
@@ -141,7 +172,19 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
         case ReachedInteraction:
             switch (next_interaction_type) {
             case Stochastic: {
-                auto loss = DoStochasticInteraction(state, utility, rnd);
+                Interaction::Loss loss;
+                if (stop_on_invalid_scattering) {
+                    auto proposed_state = state;
+                    loss = DoStochasticInteraction(proposed_state, utility, rnd);
+                    if (!IsFiniteUnitDirection(proposed_state.direction)) {
+                        continue_propagation = false;
+                        last_termination_reason_ = "invalid_scattering";
+                        break;
+                    }
+                    state = proposed_state;
+                } else {
+                    loss = DoStochasticInteraction(state, utility, rnd);
+                }
                 if (loss.type != InteractionType::Undefined)
                     track.push_back(state, loss.type, loss.comp_hash);
                 if (state.energy <= InteractionEnergy[MinimalE]) {
@@ -242,7 +285,8 @@ int Propagator::AdvanceParticle(ParticleState &state,
     const double energy_next_interaction, const double final_distance,
     std::function<double()> rnd_generator, Sector& current_sector,
     bool min_energy_step, const double min_energy,
-    unsigned int hierarchy_condition, unsigned int stop_on_entry_hierarchy) {
+    unsigned int hierarchy_condition, unsigned int stop_on_entry_hierarchy,
+    bool stop_on_invalid_scattering) {
 
     auto& utility = get<UTILITY>(current_sector);
     auto& density = get<DENSITY_DISTR>(current_sector);
@@ -320,8 +364,19 @@ int Propagator::AdvanceParticle(ParticleState &state,
         }
 
         // Calculate scattering proposal
-        std::tie(mean_direction, new_direction) = utility.DirectionsScatter(
+        try {
+            std::tie(mean_direction, new_direction) = utility.DirectionsScatter(
                 grammage, state.energy, energy, state.direction, rnd);
+        } catch (const multiple_scattering::ScatteringDomainError&) {
+            if (stop_on_invalid_scattering)
+                return InvalidScattering;
+            throw;
+        }
+
+        if (stop_on_invalid_scattering
+            && (!IsFiniteUnitDirection(mean_direction)
+                || !IsFiniteUnitDirection(new_direction)))
+            return InvalidScattering;
 
         // Check step
         double distance_to_border = CalculateDistanceToBorder(state.position, mean_direction, *geometry);
@@ -346,12 +401,20 @@ int Propagator::AdvanceParticle(ParticleState &state,
             const auto tangent_sector = GetCurrentSector(state.position, new_direction);
             const auto hierarchy_f = get<GEOMETRY>(tangent_sector)->GetHierarchy();
             if (hierarchy_i > hierarchy_condition && hierarchy_f < hierarchy_condition) {
+                if (stop_on_invalid_scattering
+                    && !HasConsistentSphereCrossing(*geometry, state.position,
+                        mean_direction, new_direction))
+                    return InvalidScattering;
                 state.direction = new_direction;
                 return ReachedHierarchyExit;
             }
             if (stop_on_entry_hierarchy != 0
                 && hierarchy_i < stop_on_entry_hierarchy
                 && hierarchy_f >= stop_on_entry_hierarchy) {
+                if (stop_on_invalid_scattering
+                    && !HasConsistentSphereCrossing(*get<GEOMETRY>(tangent_sector),
+                        state.position, mean_direction, new_direction))
+                    return InvalidScattering;
                 state.direction = new_direction;
                 return ReachedHierarchyEntry;
             }
@@ -394,6 +457,27 @@ int Propagator::AdvanceParticle(ParticleState &state,
             grammage = -1;
         }
     } while (advancement_type == InvalidStep);
+
+    if (stop_on_invalid_scattering && advancement_type == ReachedBorder) {
+        const auto proposed_position = state.position + distance * mean_direction;
+        for (const auto& sector : sector_list) {
+            const auto& boundary = get<GEOMETRY>(sector);
+            if (boundary->GetHierarchy() < geometry->GetHierarchy())
+                continue;
+            const auto border = boundary->DistanceToBorder(state.position, mean_direction).first;
+            if (border >= 0 && std::abs(border - distance) <= PARTICLE_POSITION_RESOLUTION
+                && !HasConsistentSphereCrossing(*boundary, proposed_position,
+                    mean_direction, new_direction))
+                return InvalidScattering;
+        }
+    }
+
+    if (stop_on_invalid_scattering && advancement_type == ReachedBorder) {
+        const auto proposed_position = state.position + distance * mean_direction;
+        if (proposed_position.GetCartesianCoordinates()
+            == state.position.GetCartesianCoordinates())
+            return InvalidScattering;
+    }
 
     state.time = state.time + utility.TimeElapsed(state.energy, energy, grammage, density->Evaluate(state.position)); // TODO: should the energy passed here be the randomized energy or not?
     state.position = state.position + distance * mean_direction;
