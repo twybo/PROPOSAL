@@ -549,3 +549,113 @@ def test_particle_builder_owns_temporary_source_table() -> None:
     del builder, replacements
     gc.collect()
     assert built == pp.particle.MuMinusDef()
+
+
+@pytest.mark.parametrize('material', ['ice', 'rock'])
+@pytest.mark.parametrize('charge', [.001, .01, .1])
+def test_deferred_predictor_matches_eager_midpoints(material: str, charge: float) -> None:
+    backend = cutoff_backend(charge, material, 1e15)
+    for energy, length in ((101., .1), (1000., 100.), (1e6, 1000.)):
+        initial = envelope_state(20., 1000.)
+        initial.energy = energy
+        pp.RandomGenerator.get().set_seed(9284)
+        expected_next = pp.RandomGenerator.get().random_double()
+        pp.RandomGenerator.get().set_seed(9284)
+        deferred = backend.predict_core_moments(initial, length)
+        eager = backend.predict_core_moments(initial, length, defer_angular=False)
+        assert deferred.valid and eager.valid
+        assert (deferred.a0, deferred.a1, deferred.a2) == (eager.a0, eager.a1, eager.a2)
+        assert deferred.attempted_panels == eager.attempted_panels
+        assert deferred.completed_panels == eager.completed_panels
+        assert deferred.angular_evaluations == eager.angular_evaluations > 0
+        assert pp.RandomGenerator.get().random_double() == expected_next
+        a = pp.Propagator.evaluate_core_envelope(initial, stopping_policy(), deferred)
+        b = pp.Propagator.evaluate_core_envelope(initial, stopping_policy(), eager)
+        assert (a.triggered, a.score, a.zero_variance_excluded) == (b.triggered, b.score, b.zero_variance_excluded)
+
+
+@pytest.mark.parametrize('energy,length,floor,reason', [
+    (1e6, 1e12, 0., 'panel_budget'),
+    (1000., 1e8, 900., 'energy_domain'),
+])
+def test_deferred_predictor_skips_failed_schedule_angles(energy: float, length: float, floor: float, reason: str) -> None:
+    backend = cutoff_backend(.1, 'rock', 1e15)
+    initial = envelope_state(20., 1000.)
+    initial.energy = energy
+    deferred = backend.predict_core_moments(initial, length, min_energy=floor)
+    eager = backend.predict_core_moments(initial, length, min_energy=floor, defer_angular=False)
+    assert not deferred.valid and not eager.valid
+    assert deferred.fallback == eager.fallback == reason
+    assert deferred.attempted_panels == eager.attempted_panels
+    assert deferred.completed_panels == eager.completed_panels
+    assert deferred.angular_evaluations == 0
+    assert eager.angular_evaluations > 0
+    assert not pp.Propagator.evaluate_core_envelope(initial, stopping_policy(), deferred).triggered
+
+
+def test_deferred_predictor_material_boundaries() -> None:
+    p = particle('mcp', 100., .01)
+    ice, rock = medium('ice'), medium('rock')
+    first = pp.geometry.Box(pp.Cartesian3D(0., 0., .5), 100., 100., 1.)
+    second = pp.geometry.Box(pp.Cartesian3D(0., 0., 1.5), 100., 100., 1.)
+    first.hierarchy, second.hierarchy = 2, 3
+    world = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e6)
+    ui, ur = utility(p, ice, 'MoliereInterpol'), utility(p, rock, 'MoliereInterpol')
+    di = pp.density_distribution.density_homogeneous(ice.mass_density)
+    dr = pp.density_distribution.density_homogeneous(rock.mass_density)
+    backend = pp.Propagator(p, [(first, ui, di), (second, ur, dr), (world, ui, di)])
+    deferred = backend.predict_core_moments(state(1000.), 2., 10., 0., 1)
+    eager = backend.predict_core_moments(state(1000.), 2., 10., 0., 1, False)
+    assert deferred.valid and eager.valid
+    assert (deferred.a0, deferred.a1, deferred.a2) == (eager.a0, eager.a1, eager.a2)
+    assert deferred.completed_panels == eager.completed_panels
+
+
+def test_sub_ulp_collision_step_keeps_pending_collision() -> None:
+    p, mat = particle('mcp', 100., .1), medium('rock')
+    util = utility(p, mat, 'MoliereInterpol')
+    world = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e15)
+    density = pp.density_distribution.density_homogeneous(mat.mass_density)
+    backend = pp.Propagator(p, [(world, util, density)])
+    initial = state(100.50326758346768)
+    initial.position = pp.Cartesian3D(-313283886.65461427, 287261354.37630242, 162058228.13012937)
+    initial.direction = pp.Cartesian3D(-.15881323477137252, -.70187428561547827, -.69437082575034426)
+    initial.direction.normalize()
+    initial.propagated_distance = 24747.503182562214
+    length = 2.7790062120374647e-8
+    model = pp.scattering.MoliereInterpol(p, mat).coulomb
+    rate = model.moments(initial.energy, 1e-5, 1.).rate
+    collision_draw = math.exp(-length * mat.mass_density * rate)
+    # Stochastic floor, hard collision distance, then a half-way soft hinge.
+    draws = iter([np.nextafter(0., 1.), collision_draw, .5])
+    fallback = random.Random(67322)
+    rng = pp.RandomGenerator.get()
+    def draw() -> float:
+        try:
+            return float(next(draws))
+        except StopIteration:
+            return fallback.random()
+    rng.set_random_function(draw)
+    try:
+        result = backend.propagate(initial, initial.propagated_distance + 1.25 * length)
+    finally:
+        rng.set_default_random_function()
+    assert backend.last_termination_reason == 'max_distance'
+    assert backend.transport_result.diagnostics.collisions >= 1
+    collision = backend.transport_result.collisions[0]
+    np.testing.assert_array_equal(xyz(collision.before.position), xyz(initial.position))
+    assert collision.before.propagated_distance > initial.propagated_distance
+    assert not np.array_equal(xyz(collision.before.direction), xyz(collision.after.direction))
+    assert result.final_state().propagated_distance > initial.propagated_distance
+
+
+def test_true_path_nonprogress_remains_failure() -> None:
+    p, mat = particle('mcp', 100., .001), medium('ice')
+    util = utility(p, mat, 'MoliereInterpol', max_step=1e-8)
+    world = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e15)
+    density = pp.density_distribution.density_homogeneous(mat.mass_density)
+    backend = pp.Propagator(p, [(world, util, density)])
+    initial = state(1000.)
+    initial.propagated_distance = 1e20
+    with pytest.raises(RuntimeError, match='Nonadvancing Coulomb propagation step'):
+        backend.propagate(initial, 1e20 + 1e5)

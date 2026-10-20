@@ -176,8 +176,9 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
         transport_result_.segments.push_back({before,state,distance,g});
         if (part == 0 && angular > 0.) state.direction = Coulomb::Rotate(state.direction,theta,phi);
     }
-    if (state.propagated_distance <= initial_state.propagated_distance
-        || (state.position-initial_state.position).magnitude() == 0.) {
+    // Sub-ULP Cartesian displacements are valid when the path advances;
+    // in particular, a pending hard collision must still be sampled below.
+    if (state.propagated_distance <= initial_state.propagated_distance) {
         std::ostringstream error;
         error << std::setprecision(17) << "Nonadvancing Coulomb propagation step: length=" << length
             << " grammage=" << grammage << " event=" << event_grammage << " collision=" << collision_grammage
@@ -275,7 +276,7 @@ StoppingDiagnostics Propagator::EvaluateCoreEnvelope(const ParticleState& state,
 }
 
 CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double length,
-    double max_distance, double min_energy, unsigned int hierarchy_condition)
+    double max_distance, double min_energy, unsigned int hierarchy_condition, bool defer_angular)
 {
     const auto started = std::clock();
     CoreMoments moments;
@@ -287,6 +288,28 @@ CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double 
     auto state = initial;
     if (!std::isfinite(state.direction.magnitude()) || state.direction.magnitude() == 0.) fail("invalid_direction");
     if (moments.valid) state.direction.normalize();
+    struct AngularQuery {
+        std::shared_ptr<Coulomb> model;
+        std::vector<std::shared_ptr<CrossSectionBase>> cross;
+        double energy, rho, polar;
+        size_t attempted, completed;
+        double panel = 0., remaining = 0.;
+    };
+    std::vector<AngularQuery> queries;
+    if (defer_angular) queries.reserve(512);
+    auto angular_power = [&](const AngularQuery& query) {
+        double polar = query.polar;
+        for (const auto& cross : query.cross) {
+            if (cross->GetInteractionType() == InteractionType::Ioniz) {
+                ++moments.angular_evaluations;
+                polar += query.model->ElectronAngular(query.energy,*cross);
+            }
+        }
+        const double power = query.rho*polar/2.;
+        if (!std::isfinite(power) || power < 0.)
+            throw std::domain_error("invalid prediction power");
+        return power;
+    };
     double covered = 0.;
     try {
         while (moments.valid && covered < length) {
@@ -309,19 +332,23 @@ CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double 
             auto coefficients = [&](double energy) {
                 model->ValidateEnergy(energy);
                 const auto soft = model->Moments(energy,0.,model->settings.separation);
-                double stopping = soft.stopping, polar = soft.angular;
-                for (const auto& cross : utility.collection.interaction_calc->GetCrossSections()) {
+                double stopping = soft.stopping;
+                const auto& cross_sections = utility.collection.interaction_calc->GetCrossSections();
+                for (const auto& cross : cross_sections) {
                     const double loss = cross->CalculatedEdx(energy);
                     if (!std::isfinite(loss) || loss < 0.) throw std::domain_error("invalid stopping");
                     stopping += loss;
-                    if (cross->GetInteractionType() == InteractionType::Ioniz)
-                        polar += model->ElectronAngular(energy,*cross);
                 }
-                const double power = rho*polar/2.;
                 stopping *= rho;
-                if (!std::isfinite(stopping) || stopping < 0. || !std::isfinite(power) || power < 0.)
-                    throw std::domain_error("invalid prediction coefficients");
-                return std::make_pair(stopping,power);
+                if (!std::isfinite(stopping) || stopping < 0.)
+                    throw std::domain_error("invalid prediction stopping");
+                AngularQuery query{model, cross_sections, energy, rho, soft.angular,
+                    moments.attempted_panels, moments.completed_panels};
+                if (defer_angular) {
+                    queries.push_back(std::move(query));
+                    return std::make_pair(stopping,0.);
+                }
+                return std::make_pair(stopping,angular_power(query));
             };
             auto first = coefficients(state.energy);
             double panel = std::min(length-covered,length/16.);
@@ -341,8 +368,13 @@ CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double 
                     panel *= 0.5; continue;
                 }
                 if (state.energy-loss <= floor) { fail("energy_domain"); break; }
-                moments.AddPanel(midpoint.second,panel,length-covered-panel/2.);
-                if (!moments.valid) break;
+                if (defer_angular) {
+                    queries.back().panel = panel;
+                    queries.back().remaining = length-covered-panel/2.;
+                } else {
+                    moments.AddPanel(midpoint.second,panel,length-covered-panel/2.);
+                    if (!moments.valid) break;
+                }
                 const double next = covered+panel;
                 state.position = initial.position+next*state.direction;
                 state.energy -= loss;
@@ -352,6 +384,26 @@ CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double 
                 break;
             }
             if (!accepted && moments.valid) fail("panel_budget");
+        }
+        // Energy/path failures already require full transport. Only schedules
+        // that cover L need angular quadrature; retain start/rejected-query
+        // validation in the original order as well as accepted midpoints.
+        if (defer_angular && moments.valid) {
+            for (const auto& query : queries) {
+                try {
+                    const double power = angular_power(query);
+                    if (query.panel > 0.) moments.AddPanel(power,query.panel,query.remaining);
+                } catch (...) {
+                    moments.attempted_panels = query.attempted;
+                    moments.completed_panels = query.completed;
+                    throw;
+                }
+                if (!moments.valid) {
+                    moments.attempted_panels = query.attempted;
+                    moments.completed_panels = query.completed;
+                    break;
+                }
+            }
         }
     } catch (const std::exception&) { fail("coefficient_domain"); }
     if (moments.valid && !moments.IsPositiveSemidefinite()) fail("invalid_covariance");

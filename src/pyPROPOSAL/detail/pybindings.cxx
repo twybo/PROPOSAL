@@ -448,6 +448,7 @@ PYBIND11_MODULE(proposal, m)
         m, "RandomGenerator")
         .def("random_double", &RandomGenerator::RandomDouble)
         .def("set_seed", &RandomGenerator::SetSeed, py::arg("seed") = 0)
+        .def("set_default_random_function", &RandomGenerator::SetDefaultRandomNumberGenerator)
         .def("set_random_function",
     &RandomGenerator::SetRandomNumberGenerator,
             py::arg("function"))
@@ -474,6 +475,7 @@ PYBIND11_MODULE(proposal, m)
         .def_readwrite("fallback", &CoreMoments::fallback)
         .def_readwrite("attempted_panels", &CoreMoments::attempted_panels)
         .def_readwrite("completed_panels", &CoreMoments::completed_panels)
+        .def_readonly("angular_evaluations", &CoreMoments::angular_evaluations)
         .def("add_panel", &CoreMoments::AddPanel)
         .def("positive_semidefinite", &CoreMoments::IsPositiveSemidefinite);
     py::class_<StoppingDiagnostics>(m, "StoppingDiagnostics")
@@ -509,7 +511,8 @@ PYBIND11_MODULE(proposal, m)
         .def_static("evaluate_core_envelope", &Propagator::EvaluateCoreEnvelope)
         .def("predict_core_moments", &Propagator::PredictCoreMoments,
             py::arg("state"), py::arg("length"), py::arg("max_distance") = 1e20,
-            py::arg("min_energy") = 0., py::arg("hierarchy_condition") = 0)
+            py::arg("min_energy") = 0., py::arg("hierarchy_condition") = 0,
+            py::arg("defer_angular") = true)
         .def_property_readonly("stopping_diagnostics", &Propagator::GetStoppingDiagnostics)
         .def_property_readonly("transport_result", &Propagator::GetTransportResult)
         .def_property_readonly("last_termination_reason", &Propagator::GetLastTerminationReason);

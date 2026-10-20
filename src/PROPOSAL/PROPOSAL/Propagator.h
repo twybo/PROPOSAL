@@ -29,7 +29,7 @@ struct StoppingPolicy {
 
 struct CoreMoments {
     double a0 = 0., a1 = 0., a2 = 0.;
-    size_t attempted_panels = 0, completed_panels = 0;
+    size_t attempted_panels = 0, completed_panels = 0, angular_evaluations = 0;
     bool valid = true;
     std::string fallback;
     void AddPanel(double power, double length, double remaining);
@@ -71,7 +71,8 @@ public:
     StoppingDiagnostics GetStoppingDiagnostics() const
     { auto result = stopping_diagnostics_; result.transport = transport_result_.diagnostics; return result; }
     CoreMoments PredictCoreMoments(const ParticleState&, double length,
-        double max_distance = 1e20, double min_energy = 0., unsigned int hierarchy_condition = 0);
+        double max_distance = 1e20, double min_energy = 0., unsigned int hierarchy_condition = 0,
+        bool defer_angular = true);
     static StoppingDiagnostics EvaluateCoreEnvelope(const ParticleState&,
         const StoppingPolicy&, const CoreMoments&);
     enum { GEOMETRY, UTILITY, DENSITY_DISTR };
