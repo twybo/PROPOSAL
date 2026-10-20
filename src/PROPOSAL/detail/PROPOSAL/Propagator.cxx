@@ -30,6 +30,9 @@
 #include "PROPOSAL/propagation_utility/TimeBuilder.h"
 #include "PROPOSAL/scattering/ScatteringFactory.h"
 #include <fstream>
+#include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <cmath>
 
 #include <iomanip>
@@ -113,11 +116,52 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
     auto rnd
         = std::bind(&RandomGenerator::RandomDouble, &RandomGenerator::Get());
 
+    const char* progress_option = std::getenv("PROPOSAL_NATIVE_PROGRESS");
+    const bool show_progress = progress_option && *progress_option && std::string(progress_option) != "0";
+    const auto progress_started = std::chrono::steady_clock::now();
+    auto progress_last = progress_started;
+    size_t loop_iterations = 0;
+    auto progress = [&](const char* phase) {
+        if (!show_progress) return;
+        const auto now = std::chrono::steady_clock::now();
+        nlohmann::json row{
+            {"phase",phase}, {"loop_iterations",loop_iterations},
+            {"wall_seconds",std::chrono::duration<double>(now-progress_started).count()},
+            {"energy_total_mev",state.energy}, {"path_cm",state.propagated_distance},
+            {"position_cm",state.position.GetCartesianCoordinates()},
+            {"direction",state.direction.GetCartesianCoordinates()},
+            {"segments",transport_result_.segments.size()},
+            {"soft_steps",transport_result_.diagnostics.soft_steps},
+            {"collisions",transport_result_.diagnostics.collisions},
+            {"electron_collisions",transport_result_.diagnostics.electron_collisions},
+            {"evaluations",stopping_diagnostics_.evaluations},
+            {"predictions",stopping_diagnostics_.predictions},
+            {"fallbacks",stopping_diagnostics_.fallbacks},
+            {"attempted_panels",stopping_diagnostics_.attempted_panels},
+            {"completed_panels",stopping_diagnostics_.completed_panels},
+            {"predictor_cpu_seconds",stopping_diagnostics_.predictor_cpu_seconds},
+            {"nuclear_nontrigger_bounds",stopping_diagnostics_.nuclear_nontrigger_bounds},
+            {"fallback_counts",stopping_diagnostics_.fallback_counts},
+            {"termination_reason",last_termination_reason_}};
+        if (stopping_policy) {
+            const auto geometry = EvaluateCoreEnvelope(state,*stopping_policy,CoreMoments());
+            row["distance_cm"] = geometry.distance;
+            row["forward_cm"] = geometry.forward;
+            row["impact_cm"] = geometry.impact;
+        }
+        std::cerr << "PROPOSAL_NATIVE_PROGRESS " << row.dump() << std::endl;
+        progress_last = now;
+    };
+    progress("initial");
     int advancement_type;
     auto continue_propagation = true;
 
     std::array<double, 3> InteractionEnergy;
     while (continue_propagation) {
+        ++loop_iterations;
+        if (show_progress && loop_iterations%256 == 0
+            && std::chrono::steady_clock::now()-progress_last >= std::chrono::seconds(5))
+            progress("propagating");
         if (stopping_policy) {
             const auto reconciled = GetCurrentSector(state.position, state.direction);
             const auto old_h = get<GEOMETRY>(current_sector)->GetHierarchy();
@@ -159,12 +203,16 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
             ++stopping_diagnostics_.evaluations;
             if (geometry.fallback_counts.count("eligible")) {
                 ++stopping_diagnostics_.predictions;
-                const auto moments = PredictCoreMoments(state, geometry.forward, max_distance,
-                    min_energy, hierarchy_condition);
+                const auto moments = PredictCoreMomentsImpl(state, geometry.forward, max_distance,
+                    min_energy, hierarchy_condition, true,
+                    geometry.impact-stopping_policy->radius, stopping_policy->sigma);
                 stopping_diagnostics_.attempted_panels += moments.attempted_panels;
                 stopping_diagnostics_.completed_panels += moments.completed_panels;
                 auto decision = EvaluateCoreEnvelope(state, *stopping_policy, moments);
-                if (!moments.valid) {
+                if (moments.nuclear_nontrigger) {
+                    ++stopping_diagnostics_.nuclear_nontrigger_bounds;
+                    ++stopping_diagnostics_.fallback_counts["nuclear_nontrigger"];
+                } else if (!moments.valid) {
                     ++stopping_diagnostics_.fallbacks;
                     ++stopping_diagnostics_.fallback_counts[moments.fallback];
                 }
@@ -172,6 +220,7 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                     decision.evaluations = stopping_diagnostics_.evaluations;
                     decision.predictions = stopping_diagnostics_.predictions;
                     decision.fallbacks = stopping_diagnostics_.fallbacks;
+                    decision.nuclear_nontrigger_bounds = stopping_diagnostics_.nuclear_nontrigger_bounds;
                     decision.fallback_counts = stopping_diagnostics_.fallback_counts;
                     decision.attempted_panels = stopping_diagnostics_.attempted_panels;
                     decision.completed_panels = stopping_diagnostics_.completed_panels;
@@ -308,6 +357,7 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
         && state.energy <= p_def.mass+0.2)
         last_termination_reason_ = "applicability_limit";
     moliere_diagnostics_ = multiple_scattering::Moliere::GetDiagnostics();
+    progress("terminal");
     return track;
 }
 

@@ -30,10 +30,11 @@ struct StoppingPolicy {
 struct CoreMoments {
     double a0 = 0., a1 = 0., a2 = 0.;
     size_t attempted_panels = 0, completed_panels = 0, angular_evaluations = 0;
-    bool valid = true;
+    bool valid = true, nuclear_nontrigger = false;
     std::string fallback;
     void AddPanel(double power, double length, double remaining);
     bool IsPositiveSemidefinite() const;
+    bool ProvesNontrigger(double offset, double sigma) const;
 };
 
 struct StoppingDiagnostics {
@@ -41,7 +42,7 @@ struct StoppingDiagnostics {
     ParticleState trigger;
     double distance = 0., forward = 0., impact = 0., score = 0.;
     double a0 = 0., a1 = 0., a2 = 0.;
-    size_t evaluations = 0, predictions = 0, fallbacks = 0;
+    size_t evaluations = 0, predictions = 0, fallbacks = 0, nuclear_nontrigger_bounds = 0;
     size_t attempted_panels = 0, completed_panels = 0;
     double predictor_cpu_seconds = 0.;
     std::map<std::string, size_t> fallback_counts;
@@ -78,6 +79,8 @@ public:
     enum { GEOMETRY, UTILITY, DENSITY_DISTR };
 
 private:
+    CoreMoments PredictCoreMomentsImpl(const ParticleState&, double, double, double,
+        unsigned int, bool, double, double);
     int AdvanceCoulomb(ParticleState&, double, double, std::function<double()>,
         Sector&, bool, double);
     Interaction::Loss DoStochasticInteraction(

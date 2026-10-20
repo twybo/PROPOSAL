@@ -100,7 +100,7 @@ double crosssection::IonizBetheBlochRossi::DifferentialCrossSection(
         - beta * (v / GetKinematicLimits(p_def, medium, energy).v_max)
         + spin_1_2_contribution;
     result *= IONK * p_def.charge * p_def.charge
-        * calculate_proton_massnumber_fraction(medium.GetComponents())
+        * medium.GetZA()
         / (2 * beta * energy * v * v);
 
     return result * (1 + InelCorrection(p_def, medium, energy, v));
@@ -143,7 +143,7 @@ double crosssection::IonizBetheBlochRossi::IonizationLoss(
 
     if (result > 0) {
         result *= IONK * p_def.charge * p_def.charge
-                  * calculate_proton_massnumber_fraction(medium.GetComponents())
+                  * medium.GetZA()
                   / (2 * aux);
     } else {
         result = 0;
@@ -210,7 +210,7 @@ crosssection::IonizBetheBlochRossi::CrossSectionWithoutInelasticCorrection(
     result = 1 - beta * (v / GetKinematicLimits(p_def, medium, energy).v_max)
         + spin_1_2_contribution;
     result *= IONK * p_def.charge * p_def.charge
-        * calculate_proton_massnumber_fraction(medium.GetComponents())
+        * medium.GetZA()
         / (2 * beta * energy * v * v);
 
     return result;
@@ -284,7 +284,7 @@ double crosssection::IonizBergerSeltzerBhabha::DifferentialCrossSection(
     aux *= 1. / (gamma - 1.);
     aux *= 1. / (1. - 1. / gamma); // conversion from epsilon to v
     aux *= 2. * PI * std::pow(RE, 2.) * NA
-        * calculate_proton_massnumber_fraction(medium.GetComponents());
+        * medium.GetZA();
 
     return std::max(aux, 0.);
 }
@@ -339,7 +339,7 @@ double crosssection::IonizBergerSeltzerBhabha::FunctionToDEdxIntegral(
 
     result *= 2. * PI * RE * RE * ME / betasquared;
 
-    result *= NA * calculate_proton_massnumber_fraction(medium.GetComponents());
+    result *= NA * medium.GetZA();
 
     return std::max(result, 0.);
 }
@@ -409,7 +409,7 @@ double crosssection::IonizBergerSeltzerMoller::DifferentialCrossSection(
     aux *= 1. / (gamma - 1.);
     aux *= 1. / (1. - 1. / gamma); // conversion from epsilon to v
     aux *= 2. * PI * std::pow(RE, 2.) * NA
-        * calculate_proton_massnumber_fraction(medium.GetComponents());
+        * medium.GetZA();
 
     return std::max(aux, 0.);
 }
@@ -461,7 +461,7 @@ double crosssection::IonizBergerSeltzerMoller::FunctionToDEdxIntegral(
 
     result *= 2. * PI * RE * RE * ME / betasquared;
 
-    result *= NA * calculate_proton_massnumber_fraction(medium.GetComponents());
+    result *= NA * medium.GetZA();
 
     return std::max(result, 0.);
 }

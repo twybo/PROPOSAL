@@ -275,8 +275,25 @@ StoppingDiagnostics Propagator::EvaluateCoreEnvelope(const ParticleState& state,
     return result;
 }
 
+bool CoreMoments::ProvesNontrigger(double offset, double sigma) const
+{
+    if (!IsPositiveSemidefinite() || !(a2 > 0.) || !std::isfinite(offset)
+        || offset < 0. || !std::isfinite(sigma) || !(sigma > 0.)) return false;
+    const double score = offset/std::sqrt(a2);
+    return std::isfinite(score)
+        && score < sigma*(1.-64.*std::numeric_limits<double>::epsilon());
+}
+
 CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double length,
     double max_distance, double min_energy, unsigned int hierarchy_condition, bool defer_angular)
+{
+    return PredictCoreMomentsImpl(initial,length,max_distance,min_energy,
+        hierarchy_condition,defer_angular,NAN,0.);
+}
+
+CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, double length,
+    double max_distance, double min_energy, unsigned int hierarchy_condition, bool defer_angular,
+    double nontrigger_offset, double nontrigger_sigma)
 {
     const auto started = std::clock();
     CoreMoments moments;
@@ -388,6 +405,20 @@ CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double 
         // Energy/path failures already require full transport. Only schedules
         // that cover L need angular quadrature; retain start/rejected-query
         // validation in the original order as well as accepted midpoints.
+        if (defer_angular && moments.valid && std::isfinite(nontrigger_offset)) {
+            CoreMoments nuclear;
+            for (const auto& query : queries) {
+                if (query.panel > 0.)
+                    nuclear.AddPanel(query.rho*query.polar/2.,query.panel,query.remaining);
+            }
+            // Adding nonnegative electron powers cannot decrease A2. This is
+            // only a nontrigger proof; these are not full predicted moments.
+            if (nuclear.ProvesNontrigger(nontrigger_offset,nontrigger_sigma)) {
+                moments.valid = false;
+                moments.nuclear_nontrigger = true;
+                moments.fallback = "nuclear_nontrigger";
+            }
+        }
         if (defer_angular && moments.valid) {
             for (const auto& query : queries) {
                 try {

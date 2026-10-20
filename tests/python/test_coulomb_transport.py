@@ -659,3 +659,76 @@ def test_true_path_nonprogress_remains_failure() -> None:
     initial.propagated_distance = 1e20
     with pytest.raises(RuntimeError, match='Nonadvancing Coulomb propagation step'):
         backend.propagate(initial, 1e20 + 1e5)
+
+
+@pytest.mark.parametrize('score,proved', [(2., True), (2.5, False), (2.500001, False)])
+def test_nuclear_lower_bound_is_conservative(score: float, proved: bool) -> None:
+    nuclear = pp.CoreMoments()
+    nuclear.a0, nuclear.a1, nuclear.a2 = 1., 0., (2./score)**2
+    assert nuclear.proves_nontrigger(2., 2.5) == proved
+    if proved:
+        for electron_variance in (0., 1e-10, 10.):
+            full = pp.CoreMoments()
+            full.a0, full.a1, full.a2 = nuclear.a0+electron_variance, 0., nuclear.a2+electron_variance
+            assert not pp.Propagator.evaluate_core_envelope(envelope_state(), stopping_policy(), full).triggered
+
+
+def test_nuclear_bound_rejects_invalid_and_threshold_rounding() -> None:
+    nuclear = pp.CoreMoments()
+    assert not nuclear.proves_nontrigger(1., 2.5)
+    nuclear.a0, nuclear.a1, nuclear.a2 = 0., 1., 1.
+    assert not nuclear.proves_nontrigger(1., 2.5)
+    nuclear.a0, nuclear.a1 = 1., 0.
+    assert not nuclear.proves_nontrigger(math.nan, 2.5)
+    score = 2.5*(1.-32.*np.finfo(float).eps)
+    nuclear.a2 = (2./score)**2
+    assert not nuclear.proves_nontrigger(2., 2.5)
+
+
+@pytest.mark.parametrize('material', ['ice', 'rock'])
+def test_cached_medium_charge_mass_factor_matches_ordered_reduction(material: str) -> None:
+    mat = medium(material)
+    charge = nucleons = 0.
+    for component in mat.components:
+        charge += component.atoms_in_molecule*component.nuclear_charge
+        nucleons += component.atoms_in_molecule*component.atomic_number
+    assert mat.ratio_ZA == charge/nucleons
+
+
+def test_native_nuclear_nontrigger_is_distinct_from_full_moments() -> None:
+    backend = cutoff_backend(.001, 'rock')
+    initial = envelope_state(1.+1e-12, 1000.)
+    initial.energy = 1000.
+    full = backend.predict_core_moments(initial, 1000.)
+    assert full.valid and not full.nuclear_nontrigger and full.angular_evaluations > 0
+    assert not pp.Propagator.evaluate_core_envelope(initial, stopping_policy(), full).triggered
+    pp.RandomGenerator.get().set_seed(815)
+    backend.propagate(initial, 1001., 0., 1, 3, True, stopping_policy())
+    diagnostics = backend.stopping_diagnostics
+    assert diagnostics.nuclear_nontrigger_bounds > 0
+    assert diagnostics.fallback_counts['nuclear_nontrigger'] == diagnostics.nuclear_nontrigger_bounds
+
+
+def test_native_progress_preserves_rng_and_terminal_state(monkeypatch: Any, capfd: Any) -> None:
+    import json
+
+    backend = cutoff_backend()
+    initial = state(1000., -2.)
+    rng = pp.RandomGenerator.get()
+    monkeypatch.delenv('PROPOSAL_NATIVE_PROGRESS', raising=False)
+    rng.set_seed(64521)
+    expected = backend.propagate(initial, .01).final_state()
+    expected_next = rng.random_double()
+    capfd.readouterr()
+    monkeypatch.setenv('PROPOSAL_NATIVE_PROGRESS', '1')
+    rng.set_seed(64521)
+    actual = backend.propagate(initial, .01).final_state()
+    assert rng.random_double() == expected_next
+    np.testing.assert_array_equal(xyz(actual.position), xyz(expected.position))
+    np.testing.assert_array_equal(xyz(actual.direction), xyz(expected.direction))
+    assert actual.energy == expected.energy and actual.propagated_distance == expected.propagated_distance
+    rows = [json.loads(line.split(' ', 1)[1]) for line in capfd.readouterr().err.splitlines()
+            if line.startswith('PROPOSAL_NATIVE_PROGRESS ')]
+    assert [row['phase'] for row in rows] == ['initial', 'terminal']
+    assert rows[-1]['path_cm'] == actual.propagated_distance
+    assert rows[-1]['termination_reason'] == 'max_distance'
