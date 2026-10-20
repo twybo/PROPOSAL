@@ -212,7 +212,7 @@ public:
     }
     Builder& SetHardComponentTable(const HardComponentTables::VecType& var)
     {
-        hard_component_table = &var;
+        hard_component_table = var;
         return *this;
     }
     Builder& SetDecayTable(const DecayTable& var)
@@ -237,7 +237,7 @@ public:
         low = var.low;
         lifetime = var.lifetime;
         charge = var.charge;
-        hard_component_table = &var.hard_component_table;
+        hard_component_table = var.hard_component_table;
         decay_table = var.decay_table;
         particle_type = var.particle_type;
         weak_partner = var.weak_partner;
@@ -252,7 +252,7 @@ public:
         }
 
         return ParticleDef(name, mass, low, lifetime, charge,
-            *hard_component_table, decay_table, particle_type, weak_partner);
+            hard_component_table, decay_table, particle_type, weak_partner);
     }
 
 private:
@@ -261,7 +261,7 @@ private:
     double low;
     double lifetime;
     double charge;
-    const HardComponentTables::VecType* hard_component_table;
+    HardComponentTables::VecType hard_component_table;
     DecayTable decay_table;
     int particle_type;
     int weak_partner;

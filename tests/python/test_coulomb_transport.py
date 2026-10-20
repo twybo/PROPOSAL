@@ -534,3 +534,18 @@ def test_disabled_policy_compatibility_and_rejection() -> None:
     invalid.identity='unknown'
     with pytest.raises(ValueError,match='policy'):
         prop.propagate(state(1000.),.01,stopping_policy=invalid)
+
+
+def test_particle_builder_owns_temporary_source_table() -> None:
+    import gc
+
+    builder = pp.particle.ParticleDefBuilder()
+    builder.SetParticleDef(pp.particle.MuMinusDef())
+    gc.collect()
+    # Reuse native vector allocations after the source definition has died.
+    replacements = [pp.particle.MuMinusDef() for _ in range(32)]
+    built = builder.build()
+    assert built == replacements[0]
+    del builder, replacements
+    gc.collect()
+    assert built == pp.particle.MuMinusDef()
