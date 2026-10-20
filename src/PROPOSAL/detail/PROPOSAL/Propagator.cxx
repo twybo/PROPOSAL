@@ -87,11 +87,14 @@ Propagator::Propagator(const ParticleDef& p_def, const nlohmann::json& config)
 
 Secondaries Propagator::Propagate(const ParticleState& initial_particle,
     double max_distance, double min_energy, unsigned int hierarchy_condition,
-    unsigned int stop_on_entry_hierarchy, bool stop_on_invalid_scattering)
+    unsigned int stop_on_entry_hierarchy, bool stop_on_invalid_scattering,
+    std::shared_ptr<const StoppingPolicy> stopping_policy)
 {
     multiple_scattering::Moliere::ResetDiagnostics();
     last_termination_reason_ = "unknown";
     transport_result_ = CoulombTransportResult();
+    stopping_diagnostics_ = StoppingDiagnostics();
+    if (stopping_policy) stopping_policy->Validate();
     Secondaries track(std::make_shared<ParticleDef>(p_def), sector_list);
 
     track.push_back(initial_particle, InteractionType::ContinuousEnergyLoss);
@@ -101,6 +104,12 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
     state.direction.normalize();
 
     auto current_sector = GetCurrentSector(state.position, state.direction);
+    if (stopping_policy) {
+        const auto scattering = get<UTILITY>(current_sector).collection.scattering;
+        const auto model = scattering ? scattering->GetCoulomb() : nullptr;
+        if (!model || model->settings.mode != CoulombMode::Mixed)
+            throw std::invalid_argument("Stopping policy requires mixed Coulomb transport");
+    }
     auto rnd
         = std::bind(&RandomGenerator::RandomDouble, &RandomGenerator::Get());
 
@@ -109,6 +118,25 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
 
     std::array<double, 3> InteractionEnergy;
     while (continue_propagation) {
+        if (stopping_policy) {
+            const auto reconciled = GetCurrentSector(state.position, state.direction);
+            const auto old_h = get<GEOMETRY>(current_sector)->GetHierarchy();
+            const auto new_h = get<GEOMETRY>(reconciled)->GetHierarchy();
+            current_sector = reconciled;
+            if (old_h > hierarchy_condition && new_h < hierarchy_condition) {
+                last_termination_reason_ = "exit";
+                break;
+            }
+            if (stop_on_entry_hierarchy && old_h < stop_on_entry_hierarchy && new_h >= stop_on_entry_hierarchy) {
+                last_termination_reason_ = "entry";
+                break;
+            }
+            if (state.propagated_distance >= max_distance) {
+                last_termination_reason_ = "max_distance";
+                break;
+            }
+        }
+
         auto& utility = get<UTILITY>(current_sector);
         auto& density = get<DENSITY_DISTR>(current_sector);
 
@@ -119,6 +147,43 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
             if (state.energy <= InteractionEnergy[MinimalE]) {
                 last_termination_reason_ = min_energy >= p_def.mass+0.2 ? "energy" : "applicability_limit";
                 break;
+            }
+        }
+        // Legacy straight transport must not invert a range below its floor.
+        if (state.energy <= InteractionEnergy[MinimalE]) {
+            last_termination_reason_ = "energy";
+            break;
+        }
+        if (stopping_policy) {
+            auto geometry = EvaluateCoreEnvelope(state, *stopping_policy, CoreMoments());
+            ++stopping_diagnostics_.evaluations;
+            if (geometry.fallback_counts.count("eligible")) {
+                ++stopping_diagnostics_.predictions;
+                const auto moments = PredictCoreMoments(state, geometry.forward, max_distance,
+                    min_energy, hierarchy_condition);
+                stopping_diagnostics_.attempted_panels += moments.attempted_panels;
+                stopping_diagnostics_.completed_panels += moments.completed_panels;
+                auto decision = EvaluateCoreEnvelope(state, *stopping_policy, moments);
+                if (!moments.valid) {
+                    ++stopping_diagnostics_.fallbacks;
+                    ++stopping_diagnostics_.fallback_counts[moments.fallback];
+                }
+                if (decision.triggered) {
+                    decision.evaluations = stopping_diagnostics_.evaluations;
+                    decision.predictions = stopping_diagnostics_.predictions;
+                    decision.fallbacks = stopping_diagnostics_.fallbacks;
+                    decision.fallback_counts = stopping_diagnostics_.fallback_counts;
+                    decision.attempted_panels = stopping_diagnostics_.attempted_panels;
+                    decision.completed_panels = stopping_diagnostics_.completed_panels;
+                    decision.predictor_cpu_seconds = stopping_diagnostics_.predictor_cpu_seconds;
+                    stopping_diagnostics_ = decision;
+                    last_termination_reason_ = "approximate_miss";
+                    track.push_back(state, InteractionType::ContinuousEnergyLoss);
+                    break;
+                }
+            } else {
+                for (const auto& item : geometry.fallback_counts)
+                    stopping_diagnostics_.fallback_counts[item.first] += item.second;
             }
         }
         if (utility.collection.scattering && utility.collection.scattering->GetCoulomb()) {
@@ -394,8 +459,17 @@ int Propagator::AdvanceParticle(ParticleState &state,
                                                       state.energy, energy);
             distance = distance_to_border;
             grammage = density->Calculate(state.position, state.direction, distance);
-            energy = utility.EnergyDistance(state.energy, grammage);
-            advancement_type = ReachedBorder;
+            if (grammage >= grammage_next_interaction) {
+                // An interaction or the energy floor occurs before this border.
+                grammage = grammage_next_interaction;
+                energy = energy_next_interaction;
+                distance = density->Correct(state.position, state.direction,
+                    grammage, max_distance);
+                advancement_type = ReachedInteraction;
+            } else {
+                energy = utility.EnergyDistance(state.energy, grammage);
+                advancement_type = ReachedBorder;
+            }
         } else if (!is_inside) {
             const auto hierarchy_i = geometry->GetHierarchy();
             const auto tangent_sector = GetCurrentSector(state.position, new_direction);
@@ -650,7 +724,8 @@ PropagationUtility::Collection Propagator::CreateUtility(
     PropagationUtility::Collection def;
     // The same tightened ionization partition feeds interactions, stopping,
     // continuous fluctuations, time and Coulomb electron deflection.
-    std::string scattering_name = scatter.value("multiple_scattering", "");
+    std::string scattering_name = scatter.is_object()
+        ? scatter.value("multiple_scattering", "") : "";
     std::transform(scattering_name.begin(), scattering_name.end(), scattering_name.begin(), ::tolower);
     if (scattering_name == "moliere" || scattering_name == "moliereinterpol" || scattering_name == "coulombdirect") {
         for (auto& cross : crosss) {

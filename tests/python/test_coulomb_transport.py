@@ -327,3 +327,210 @@ def test_positron_annihilation_competes_with_collisions(tmp_path: Path) -> None:
     pp.RandomGenerator.get().set_seed(72)
     prop.propagate(state(10.),10.)
     assert prop.last_termination_reason=="annihilation"
+
+
+def stopping_policy(radius: float = 1., center: tuple[float, float, float] = (0., 0., 0.)) -> Any:
+    policy = pp.StoppingPolicy()
+    policy.radius = radius
+    policy.center = pp.Cartesian3D(*center)
+    return policy
+
+
+def envelope_state(impact: float = 3., forward: float = 10.) -> Any:
+    s = state(1e6, -forward)
+    s.position = pp.Cartesian3D(impact, 0., -forward)
+    return s
+
+
+def test_core_uniform_and_heterogeneous_panels() -> None:
+    moments = pp.CoreMoments()
+    moments.add_panel(.02, 12., 6.)
+    assert moments.a0 == pytest.approx(.24)
+    assert moments.a1 == pytest.approx(12.*moments.a0/2.)
+    assert moments.a2 == pytest.approx(12.**2*moments.a0/3.)
+    assert moments.positive_semidefinite()
+    split = pp.CoreMoments()
+    split.add_panel(.02, 4., 10.)
+    split.add_panel(.02, 8., 4.)
+    assert (split.a0, split.a1, split.a2) == pytest.approx((moments.a0, moments.a1, moments.a2))
+    heterogeneous = pp.CoreMoments()
+    heterogeneous.add_panel(.02, 4., 10.)
+    heterogeneous.add_panel(.04, 8., 4.)
+    assert heterogeneous.a0 == pytest.approx(.4)
+    assert heterogeneous.a1 == pytest.approx(.02*(12.**2-8.**2)/2.+.04*8.**2/2.)
+    assert heterogeneous.a2 == pytest.approx(.02*(12.**3-8.**3)/3.+.04*8.**3/3.)
+    assert heterogeneous.positive_semidefinite()
+    for scale in (1e-100, 1., 1e100):
+        bad = pp.CoreMoments()
+        bad.a0, bad.a1, bad.a2 = scale, 2.*scale, scale
+        assert not bad.positive_semidefinite()
+        assert not pp.Propagator.evaluate_core_envelope(envelope_state(), stopping_policy(), bad).triggered
+    invalid = pp.CoreMoments()
+    invalid.add_panel(-1., 1., .5)
+    assert not invalid.valid
+
+
+@pytest.mark.parametrize('score,trigger', [(2.49, False), (2.5, False), (2.51, True)])
+def test_core_score_threshold(score: float, trigger: bool) -> None:
+    m = pp.CoreMoments()
+    m.a0, m.a1, m.a2 = 1., 0., (2./score)**2
+    result = pp.Propagator.evaluate_core_envelope(envelope_state(), stopping_policy(), m)
+    assert result.score == pytest.approx(score)
+    assert result.triggered == trigger
+
+
+@pytest.mark.parametrize('distance,trigger', [(5.99, False), (6., False), (6.01, True)])
+def test_core_distance_threshold(distance: float, trigger: bool) -> None:
+    s = envelope_state(3., math.sqrt(distance**2-9.))
+    assert pp.Propagator.evaluate_core_envelope(s, stopping_policy(), pp.CoreMoments()).triggered == trigger
+
+
+@pytest.mark.parametrize('impact,forward,reason', [(1.,10.,'overlap'), (.5,10.,'overlap'), (10.,0.,'nonforward'), (3.,-10.,'nonforward')])
+def test_core_geometry_fallbacks(impact: float, forward: float, reason: str) -> None:
+    out = pp.Propagator.evaluate_core_envelope(envelope_state(impact,forward), stopping_policy(), pp.CoreMoments())
+    assert not out.triggered
+    assert out.fallback_counts[reason] == 1
+
+
+def test_zero_variance_finite_encoding_and_units() -> None:
+    result = pp.Propagator.evaluate_core_envelope(envelope_state(), stopping_policy(), pp.CoreMoments())
+    assert result.triggered and result.zero_variance_excluded and result.score == 0.
+    moments = pp.CoreMoments()
+    moments.a0, moments.a1, moments.a2 = .1, .2, 1.
+    reference = pp.Propagator.evaluate_core_envelope(envelope_state(), stopping_policy(), moments)
+    scaled = pp.CoreMoments()
+    scaled.a0, scaled.a1, scaled.a2 = moments.a0, moments.a1*100., moments.a2*10000.
+    s = envelope_state(300., 1000.)
+    converted = pp.Propagator.evaluate_core_envelope(s, stopping_policy(100.), scaled)
+    assert converted.score == pytest.approx(reference.score)
+    s.position = pp.Cartesian3D(1000., -300., 0.)
+    s.direction = pp.Cartesian3D(-1., 0., 0.)
+    rotated = pp.Propagator.evaluate_core_envelope(s, stopping_policy(100.), scaled)
+    assert rotated.score == pytest.approx(reference.score)
+    s.position = s.position+pp.Cartesian3D(100.,200.,300.)
+    translated = pp.Propagator.evaluate_core_envelope(s, stopping_policy(100.,(100.,200.,300.)), scaled)
+    assert translated.score == pytest.approx(reference.score)
+
+
+def cutoff_backend(charge: float = .001, material: str = 'ice', earth_radius: float = 1e5) -> Any:
+    p, mat = particle('mcp',100.,charge), medium(material)
+    util = utility(p, mat, 'MoliereInterpol')
+    earth = pp.geometry.Sphere(pp.Cartesian3D(0.,0.,0.),earth_radius)
+    earth.hierarchy = 2
+    target = pp.geometry.Sphere(pp.Cartesian3D(0.,0.,0.),1.)
+    target.hierarchy = 3
+    world = pp.geometry.Sphere(pp.Cartesian3D(0.,0.,0.),1e15)
+    density = pp.density_distribution.density_homogeneous(mat.mass_density)
+    return pp.Propagator(p,[(target,util,density),(earth,util,density),(world,util,density)])
+
+
+def test_native_first_stop_trigger_reset_and_rng() -> None:
+    prop = cutoff_backend()
+    initial = envelope_state(20.,1000.)
+    initial.direction = pp.Cartesian3D(0.,0.,2.)
+    pp.RandomGenerator.get().set_seed(812)
+    expected = pp.RandomGenerator.get().random_double()
+    pp.RandomGenerator.get().set_seed(812)
+    final = prop.propagate(initial,2000.,0.,1,3,True,stopping_policy()).final_state()
+    result = prop.stopping_diagnostics
+    assert prop.last_termination_reason == 'approximate_miss'
+    assert result.triggered and result.predictions == 1 and result.completed_panels > 0
+    assert result.transport.soft_steps == result.transport.collisions == 0
+    assert xyz(final.position) == pytest.approx(xyz(result.trigger.position))
+    assert xyz(final.direction) == pytest.approx([0.,0.,1.])
+    assert xyz(final.direction) == pytest.approx(xyz(result.trigger.direction))
+    assert final.energy == initial.energy and final.propagated_distance == 0.
+    assert pp.RandomGenerator.get().random_double() == expected
+    prop.propagate(state(1000.),0.,0.,1,3,True)
+    reset = prop.stopping_diagnostics
+    assert not reset.triggered and reset.predictions == reset.evaluations == 0
+
+
+def test_native_priority_and_domain_fallbacks() -> None:
+    prop = cutoff_backend()
+    s = envelope_state(20.,1000.)
+    assert prop.predict_core_moments(s,1000.,100.).fallback == 'remaining_path'
+    s.energy = 100.2
+    assert prop.predict_core_moments(s,1000.).fallback == 'energy_domain'
+    prop.propagate(s,2000.,0.,1,3,True,stopping_policy())
+    assert prop.last_termination_reason == 'applicability_limit'
+    assert not prop.stopping_diagnostics.triggered
+    s.energy = 1e6
+    prop.propagate(s,0.,0.,1,3,True,stopping_policy())
+    assert prop.last_termination_reason == 'max_distance'
+    limited = cutoff_backend(earth_radius=10.)
+    assert limited.predict_core_moments(envelope_state(3.,1.),100.,1e20,0.,1).fallback == 'earth_exit'
+    # A long reference loses enough kinetic energy to exceed the fixed panel budget.
+    low = envelope_state(20.,1000.)
+    low.energy = 101.
+    result = cutoff_backend(.1,'rock',1e15).predict_core_moments(low,1e12)
+    assert not result.valid and result.fallback in {'panel_budget','energy_domain'}
+    assert result.attempted_panels <= 256
+
+
+def test_native_entry_priority_and_boundary_material() -> None:
+    prop = cutoff_backend()
+    pp.RandomGenerator.get().set_seed(147)
+    out = prop.propagate(state(1e6,-2.),10.,0.,1,3,True,stopping_policy())
+    assert prop.last_termination_reason == 'entry'
+    assert not prop.stopping_diagnostics.triggered
+    assert out.final_state().position.z == pytest.approx(-1.,abs=1e-7)
+    p=particle('mcp',100.,.001)
+    ice,rock=medium('ice'),medium('rock')
+    ui,ur=utility(p,ice,'MoliereInterpol'),utility(p,rock,'MoliereInterpol')
+    first=pp.geometry.Box(pp.Cartesian3D(0.,0.,.5),100.,100.,1.); first.hierarchy=2
+    second=pp.geometry.Box(pp.Cartesian3D(0.,0.,1.5),100.,100.,1.); second.hierarchy=3
+    world=pp.geometry.Sphere(pp.Cartesian3D(0.,0.,0.),1e6)
+    di=pp.density_distribution.density_homogeneous(ice.mass_density)
+    dr=pp.density_distribution.density_homogeneous(rock.mass_density)
+    layered=pp.Propagator(p,[(first,ui,di),(second,ur,dr),(world,ui,di)])
+    pred=layered.predict_core_moments(state(1e6),2.,10.,0.,1)
+    assert pred.valid and pred.completed_panels >=16
+    pp.RandomGenerator.get().set_seed(827)
+    out=layered.propagate(state(1e6),1.5,0.,0,0,True,stopping_policy())
+    assert layered.last_termination_reason == 'max_distance'
+    densities=[x.grammage/x.length for x in layered.transport_result.segments]
+    assert min(densities)==pytest.approx(ice.mass_density)
+    assert max(densities)==pytest.approx(rock.mass_density)
+
+
+@pytest.mark.parametrize('material',['ice','rock'])
+@pytest.mark.parametrize('charge',[.001,.01,.1])
+def test_study_interpolated_moments_and_projected_power(material: str, charge: float) -> None:
+    p,mat=particle('mcp',100.,charge),medium(material)
+    exact=pp.scattering.Coulomb(p,mat)
+    fast=pp.scattering.MoliereInterpol(p,mat).coulomb
+    for energy in (100.21,1000.,1e6):
+        for bounds in ((0.,1e-5),(1e-5,1.)):
+            a,b=exact.moments(energy,*bounds),fast.moments(energy,*bounds)
+            for field in ('rate','angular','stopping','straggling'):
+                assert getattr(a,field)==pytest.approx(getattr(b,field),rel=.002)
+    cuts=pp.EnergyCutSettings(.001,1.)
+    cross=pp.crosssection.make_crosssection(pp.parametrization.ionization.BetheBlochRossi(cuts),p,mat,cuts,False)
+    power=mat.mass_density*(fast.moments(1e6,0.,1e-5).angular+fast.electron_angular(1e6,cross))/2.
+    backend=cutoff_backend(charge,material)
+    prediction=backend.predict_core_moments(envelope_state(),.001)
+    assert prediction.valid
+    assert prediction.a0==pytest.approx(power*.001,rel=1e-7)
+    assert prediction.a1==pytest.approx(.001*prediction.a0/2.,rel=1e-7)
+    assert prediction.a2==pytest.approx(.001**2*prediction.a0/3.,rel=1e-7)
+    pp.RandomGenerator.get().set_seed(6021)
+    backend.propagate(state(1e6),.001)
+    result=backend.transport_result
+    assert result.mode == 'mixed'
+    assert result.table == pp.scattering.Coulomb.table_identity
+
+
+def test_disabled_policy_compatibility_and_rejection() -> None:
+    prop=cutoff_backend()
+    pp.RandomGenerator.get().set_seed(493)
+    first=prop.propagate(state(1000.),.01).final_state()
+    pp.RandomGenerator.get().set_seed(493)
+    second=prop.propagate(state(1000.),.01,stopping_policy=None).final_state()
+    assert xyz(first.position)==pytest.approx(xyz(second.position),rel=0.,abs=0.)
+    assert xyz(first.direction)==pytest.approx(xyz(second.direction),rel=0.,abs=0.)
+    assert first.energy==second.energy
+    invalid=stopping_policy()
+    invalid.identity='unknown'
+    with pytest.raises(ValueError,match='policy'):
+        prop.propagate(state(1000.),.01,stopping_policy=invalid)

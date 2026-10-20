@@ -143,7 +143,7 @@ struct ParticleDef {
     const double low; //!< energy below which the particle is lost [MeV]
     const double lifetime;
     const double charge;
-    const HardComponentTables::VecType& hard_component_table;
+    const HardComponentTables::VecType hard_component_table;
     const DecayTable decay_table;
     const int particle_type;
     const int weak_partner;

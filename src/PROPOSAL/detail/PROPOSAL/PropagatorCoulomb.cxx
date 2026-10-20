@@ -8,6 +8,10 @@
 #include "PROPOSAL/geometry/Box.h"
 #include "PROPOSAL/geometry/Cylinder.h"
 #include <cmath>
+#include <ctime>
+#include "PROPOSAL/propagation_utility/Displacement.h"
+#include <sstream>
+#include <iomanip>
 
 using namespace PROPOSAL;
 namespace {
@@ -124,8 +128,17 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
         length = density->Correct(state.position,state.direction,selected_grammage,length);
         grammage = selected_grammage;
     }
-    if (!(length > 0.) || !std::isfinite(length) || !std::isfinite(grammage))
-        throw std::runtime_error("Invalid Coulomb propagation step");
+    if (!(length > 0.) || !std::isfinite(length) || !std::isfinite(grammage)) {
+        std::ostringstream error;
+        error << std::setprecision(17) << "Invalid Coulomb propagation step: length=" << length
+            << " grammage=" << grammage << " event=" << event_grammage << " collision=" << collision_grammage
+            << " limit=" << limit_grammage << " remaining=" << remaining << " border=" << border
+            << " safety=" << safety << " sector=" << std::get<GEOMETRY>(sector)->GetName()
+            << " hierarchy=" << std::get<GEOMETRY>(sector)->GetHierarchy()
+            << " energy=" << state.energy << " path=" << state.propagated_distance
+            << " position=" << state.position << " direction=" << state.direction;
+        throw std::runtime_error(error.str());
+    }
     int result = ReachedCoulombStep;
     bool collision = grammage == collision_grammage;
     if (grammage == event_grammage) result = ReachedInteraction;
@@ -143,6 +156,7 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
         const double variance = soft.straggling*grammage;
         recoil = variance/recoil*gamma_sample(recoil*recoil/variance,rnd);
     }
+    const auto initial_state = state;
     const double initial_energy = state.energy;
     double accumulated = 0.;
     for (int part=0; part<(hinge ? 2 : 1); ++part) {
@@ -162,6 +176,19 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
         transport_result_.segments.push_back({before,state,distance,g});
         if (part == 0 && angular > 0.) state.direction = Coulomb::Rotate(state.direction,theta,phi);
     }
+    if (state.propagated_distance <= initial_state.propagated_distance
+        || (state.position-initial_state.position).magnitude() == 0.) {
+        std::ostringstream error;
+        error << std::setprecision(17) << "Nonadvancing Coulomb propagation step: length=" << length
+            << " grammage=" << grammage << " event=" << event_grammage << " collision=" << collision_grammage
+            << " limit=" << limit_grammage << " remaining=" << remaining << " border=" << border
+            << " safety=" << safety << " sector=" << std::get<GEOMETRY>(sector)->GetName()
+            << " hierarchy=" << std::get<GEOMETRY>(sector)->GetHierarchy()
+            << " before_energy=" << initial_state.energy << " before_path=" << initial_state.propagated_distance
+            << " before_position=" << initial_state.position << " before_direction=" << initial_state.direction
+            << " after_path=" << state.propagated_distance << " after_position=" << state.position;
+        throw std::runtime_error(error.str());
+    }
     if (angular > 0.) ++transport_result_.diagnostics.soft_steps;
     if (!(min_energy_step && result == ReachedInteraction))
         state.energy = std::max(p_def.mass, utility.EnergyRandomize(initial_energy,
@@ -177,4 +204,157 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
         || std::abs(state.direction.magnitude()-1.) > 1e-12)
         throw std::runtime_error("Invalid finite-angle transport state");
     return result;
+}
+
+void StoppingPolicy::Validate() const
+{
+    if (identity != "handoff-core-envelope-v1" || predictor != "midpoint-256-v1"
+        || sigma != 2.5 || distance_factor != 6. || !(radius > 0.)
+        || !std::isfinite(radius) || !std::isfinite(center.magnitude()))
+        throw std::invalid_argument("Unsupported or invalid stopping policy");
+}
+
+void CoreMoments::AddPanel(double power, double length, double remaining)
+{
+    if (!std::isfinite(power) || power < 0. || !std::isfinite(length)
+        || length <= 0. || !std::isfinite(remaining) || remaining < length/2.) {
+        valid = false; fallback = "invalid_panel"; return;
+    }
+    const double variance = power*length;
+    a0 += variance;
+    a1 += variance*remaining;
+    a2 += variance*(remaining*remaining+length*length/12.);
+}
+
+bool CoreMoments::IsPositiveSemidefinite() const
+{
+    if (!valid || !std::isfinite(a0) || !std::isfinite(a1) || !std::isfinite(a2)
+        || a0 < 0. || a2 < 0.) return false;
+    // Compare correlation rather than determinants with unlike physical units.
+    if (a0 == 0. || a2 == 0.) return a1 == 0.;
+    const double correlation = (a1/std::sqrt(a0))/std::sqrt(a2);
+    return std::isfinite(correlation) && std::abs(correlation) <= 1.+64.*std::numeric_limits<double>::epsilon();
+}
+
+StoppingDiagnostics Propagator::EvaluateCoreEnvelope(const ParticleState& state,
+    const StoppingPolicy& policy, const CoreMoments& moments)
+{
+    policy.Validate();
+    StoppingDiagnostics result;
+    const auto v = policy.center-state.position;
+    auto u = state.direction;
+    if (!std::isfinite(u.magnitude()) || u.magnitude() == 0.) {
+        result.fallback_counts["invalid_direction"] = 1; return result;
+    }
+    u.normalize();
+    result.distance = v.magnitude();
+    result.forward = v*u;
+    result.impact = (v-result.forward*u).magnitude();
+    if (!std::isfinite(result.distance) || !std::isfinite(result.forward) || !std::isfinite(result.impact)) {
+        result.fallback_counts["invalid_geometry"] = 1; return result;
+    }
+    if (result.distance <= policy.distance_factor*policy.radius) {
+        result.fallback_counts["distance_gate"] = 1; return result;
+    }
+    if (result.forward <= 0.) {
+        result.fallback_counts["nonforward"] = 1; return result;
+    }
+    if (result.impact <= policy.radius) {
+        result.fallback_counts["overlap"] = 1; return result;
+    }
+    result.fallback_counts["eligible"] = 1;
+    if (!moments.IsPositiveSemidefinite()) return result;
+    result.a0 = moments.a0; result.a1 = moments.a1; result.a2 = moments.a2;
+    const double delta = result.impact-policy.radius;
+    result.zero_variance_excluded = moments.a2 == 0. && delta > 0.;
+    if (moments.a2 > 0.) result.score = delta/std::sqrt(moments.a2);
+    if (!std::isfinite(result.score)) return result;
+    result.triggered = result.zero_variance_excluded || result.score > policy.sigma;
+    if (result.triggered) result.trigger = state;
+    return result;
+}
+
+CoreMoments Propagator::PredictCoreMoments(const ParticleState& initial, double length,
+    double max_distance, double min_energy, unsigned int hierarchy_condition)
+{
+    const auto started = std::clock();
+    CoreMoments moments;
+    auto fail = [&](const std::string& reason) {
+        moments.valid = false; moments.fallback = reason;
+    };
+    if (!(length > 0.) || !std::isfinite(length)) fail("invalid_length");
+    if (length > max_distance-initial.propagated_distance) fail("remaining_path");
+    auto state = initial;
+    if (!std::isfinite(state.direction.magnitude()) || state.direction.magnitude() == 0.) fail("invalid_direction");
+    if (moments.valid) state.direction.normalize();
+    double covered = 0.;
+    try {
+        while (moments.valid && covered < length) {
+            if (moments.attempted_panels >= 256) { fail("panel_budget"); break; }
+            const auto sector = GetCurrentSector(state.position,state.direction);
+            const auto geometry = std::get<GEOMETRY>(sector);
+            auto utility = std::get<UTILITY>(sector);
+            const auto density = std::get<DENSITY_DISTR>(sector);
+            if (geometry->GetHierarchy() < hierarchy_condition) { fail("earth_exit"); break; }
+            if (!dynamic_cast<const Sphere*>(geometry.get()) && !dynamic_cast<const Box*>(geometry.get())
+                && !dynamic_cast<const Cylinder*>(geometry.get())) { fail("unsupported_geometry"); break; }
+            if (!dynamic_cast<const Density_homogeneous*>(density.get())) { fail("unsupported_density"); break; }
+            auto model = utility.collection.scattering ? utility.collection.scattering->GetCoulomb() : nullptr;
+            if (!model || model->settings.mode != CoulombMode::Mixed) { fail("unsupported_model"); break; }
+            model->settings.Validate();
+            const double rho = density->Evaluate(state.position);
+            if (!(rho > 0.) || !std::isfinite(rho)) { fail("invalid_density"); break; }
+            const double floor = std::max({min_energy,p_def.mass+0.2,utility.collection.displacement_calc->GetLowerLim()});
+            if (!std::isfinite(state.energy) || state.energy <= floor) { fail("energy_domain"); break; }
+            auto coefficients = [&](double energy) {
+                model->ValidateEnergy(energy);
+                const auto soft = model->Moments(energy,0.,model->settings.separation);
+                double stopping = soft.stopping, polar = soft.angular;
+                for (const auto& cross : utility.collection.interaction_calc->GetCrossSections()) {
+                    const double loss = cross->CalculatedEdx(energy);
+                    if (!std::isfinite(loss) || loss < 0.) throw std::domain_error("invalid stopping");
+                    stopping += loss;
+                    if (cross->GetInteractionType() == InteractionType::Ioniz)
+                        polar += model->ElectronAngular(energy,*cross);
+                }
+                const double power = rho*polar/2.;
+                stopping *= rho;
+                if (!std::isfinite(stopping) || stopping < 0. || !std::isfinite(power) || power < 0.)
+                    throw std::domain_error("invalid prediction coefficients");
+                return std::make_pair(stopping,power);
+            };
+            auto first = coefficients(state.energy);
+            double panel = std::min(length-covered,length/16.);
+            const double border = CalculateDistanceToBorder(state.position,state.direction,*geometry);
+            if (border > 0.) panel = std::min(panel,border);
+            const double kinetic = state.energy-p_def.mass;
+            if (first.first > 0.) panel = std::min(panel,model->settings.max_fractional_loss*kinetic/first.first);
+            bool accepted = false;
+            while (moments.attempted_panels < 256) {
+                ++moments.attempted_panels;
+                if (!(panel > 0.) || covered+panel == covered) { fail("nonprogress"); break; }
+                const double midpoint_energy = state.energy-first.first*panel/2.;
+                if (midpoint_energy <= floor) { fail("energy_domain"); break; }
+                const auto midpoint = coefficients(midpoint_energy);
+                const double loss = midpoint.first*panel;
+                if (loss > model->settings.max_fractional_loss*kinetic*(1.+1e-12)) {
+                    panel *= 0.5; continue;
+                }
+                if (state.energy-loss <= floor) { fail("energy_domain"); break; }
+                moments.AddPanel(midpoint.second,panel,length-covered-panel/2.);
+                if (!moments.valid) break;
+                const double next = covered+panel;
+                state.position = initial.position+next*state.direction;
+                state.energy -= loss;
+                covered = next;
+                ++moments.completed_panels;
+                accepted = true;
+                break;
+            }
+            if (!accepted && moments.valid) fail("panel_budget");
+        }
+    } catch (const std::exception&) { fail("coefficient_domain"); }
+    if (moments.valid && !moments.IsPositiveSemidefinite()) fail("invalid_covariance");
+    stopping_diagnostics_.predictor_cpu_seconds += double(std::clock()-started)/CLOCKS_PER_SEC;
+    return moments;
 }

@@ -36,9 +36,16 @@ Coulomb::Coulomb(const ParticleDef& p, const Medium& m, CoulombSettings s)
 {
     settings.Validate();
     const int type = std::abs(p.particle_type);
+    // Atmospheric mCP definitions use qqq e s mmm e, not a standard PDG ID.
+    const bool project_pointlike = p.name == "mCP"
+        && type >= 100000000 && type <= 999999999
+        && (type / 10000) % 10 <= 1 && (type / 10) % 1000 >= 100
+        && p.low == p.mass && std::isinf(p.lifetime) && p.lifetime > 0.
+        && p.hard_component_table.empty() && p.charge > 0. && p.charge <= 1.;
     if (!(p.mass > 0.) || !std::isfinite(p.mass) || !std::isfinite(p.charge)
         || p.charge == 0.
-        || (type != 0 && type != 11 && type != 13 && type < 1000000000))
+        || (type != 0 && type != 11 && type != 13 && type < 1000000000
+            && !project_pointlike))
         throw std::invalid_argument("Coulomb supports e+/-, mu+/- and custom pointlike Dirac electric particles with finite nonzero charge");
     for (const auto& c : components_) {
         // Above this coupling the first Coulomb correction is not a supported

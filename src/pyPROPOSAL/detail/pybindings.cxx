@@ -455,6 +455,47 @@ PYBIND11_MODULE(proposal, m)
             "get", &RandomGenerator::Get,
     py::return_value_policy::reference);
 
+    m.attr("atmfcp_stopping_policy") = "handoff-core-envelope-v1";
+    m.attr("atmfcp_stopping_predictor") = "midpoint-256-v1";
+    py::class_<StoppingPolicy, std::shared_ptr<StoppingPolicy>>(m, "StoppingPolicy")
+        .def(py::init<>())
+        .def_readwrite("identity", &StoppingPolicy::identity)
+        .def_readwrite("predictor", &StoppingPolicy::predictor)
+        .def_readwrite("center", &StoppingPolicy::center)
+        .def_readwrite("radius", &StoppingPolicy::radius)
+        .def_readwrite("sigma", &StoppingPolicy::sigma)
+        .def_readwrite("distance_factor", &StoppingPolicy::distance_factor)
+        .def("validate", &StoppingPolicy::Validate);
+    py::class_<CoreMoments>(m, "CoreMoments").def(py::init<>())
+        .def_readwrite("a0", &CoreMoments::a0)
+        .def_readwrite("a1", &CoreMoments::a1)
+        .def_readwrite("a2", &CoreMoments::a2)
+        .def_readwrite("valid", &CoreMoments::valid)
+        .def_readwrite("fallback", &CoreMoments::fallback)
+        .def_readwrite("attempted_panels", &CoreMoments::attempted_panels)
+        .def_readwrite("completed_panels", &CoreMoments::completed_panels)
+        .def("add_panel", &CoreMoments::AddPanel)
+        .def("positive_semidefinite", &CoreMoments::IsPositiveSemidefinite);
+    py::class_<StoppingDiagnostics>(m, "StoppingDiagnostics")
+        .def_readonly("triggered", &StoppingDiagnostics::triggered)
+        .def_readonly("zero_variance_excluded", &StoppingDiagnostics::zero_variance_excluded)
+        .def_readonly("trigger", &StoppingDiagnostics::trigger)
+        .def_readonly("distance", &StoppingDiagnostics::distance)
+        .def_readonly("forward", &StoppingDiagnostics::forward)
+        .def_readonly("impact", &StoppingDiagnostics::impact)
+        .def_readonly("score", &StoppingDiagnostics::score)
+        .def_readonly("a0", &StoppingDiagnostics::a0)
+        .def_readonly("a1", &StoppingDiagnostics::a1)
+        .def_readonly("a2", &StoppingDiagnostics::a2)
+        .def_readonly("evaluations", &StoppingDiagnostics::evaluations)
+        .def_readonly("predictions", &StoppingDiagnostics::predictions)
+        .def_readonly("fallbacks", &StoppingDiagnostics::fallbacks)
+        .def_readonly("attempted_panels", &StoppingDiagnostics::attempted_panels)
+        .def_readonly("completed_panels", &StoppingDiagnostics::completed_panels)
+        .def_readonly("predictor_cpu_seconds", &StoppingDiagnostics::predictor_cpu_seconds)
+        .def_readonly("fallback_counts", &StoppingDiagnostics::fallback_counts)
+        .def_readonly("transport", &StoppingDiagnostics::transport);
+
     py::class_<Propagator, std::shared_ptr<Propagator>>(m, "Propagator")
         .def(py::init<const ParticleDef&, std::vector<Sector>>())
         .def(py::init<const ParticleDef&, const std::string&>(),
@@ -463,8 +504,13 @@ PYBIND11_MODULE(proposal, m)
             py::arg("max_distance") = 1.e20, py::arg("min_energy") = 0.,
             py::arg("hierarchy_condition") = 0,
             py::arg("stop_on_entry_hierarchy") = 0,
-            py::arg("stop_on_invalid_scattering") = false)
+            py::arg("stop_on_invalid_scattering") = false, py::arg("stopping_policy") = nullptr)
         .def_property_readonly("moliere_diagnostics", &Propagator::GetMoliereDiagnostics)
+        .def_static("evaluate_core_envelope", &Propagator::EvaluateCoreEnvelope)
+        .def("predict_core_moments", &Propagator::PredictCoreMoments,
+            py::arg("state"), py::arg("length"), py::arg("max_distance") = 1e20,
+            py::arg("min_energy") = 0., py::arg("hierarchy_condition") = 0)
+        .def_property_readonly("stopping_diagnostics", &Propagator::GetStoppingDiagnostics)
         .def_property_readonly("transport_result", &Propagator::GetTransportResult)
         .def_property_readonly("last_termination_reason", &Propagator::GetLastTerminationReason);
 

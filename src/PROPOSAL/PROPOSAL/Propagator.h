@@ -4,6 +4,7 @@
 #include "PROPOSAL/scattering/multiple_scattering/Moliere.h"
 #include <nlohmann/json.hpp>
 #include <unordered_map>
+#include <memory>
 
 namespace PROPOSAL {
 struct ParticleDef;
@@ -17,6 +18,36 @@ struct CrossSectionBase;
 }
 
 namespace PROPOSAL {
+struct StoppingPolicy {
+    std::string identity = "handoff-core-envelope-v1";
+    std::string predictor = "midpoint-256-v1";
+    Cartesian3D center;
+    double radius = 0.; // cm
+    double sigma = 2.5, distance_factor = 6.;
+    void Validate() const;
+};
+
+struct CoreMoments {
+    double a0 = 0., a1 = 0., a2 = 0.;
+    size_t attempted_panels = 0, completed_panels = 0;
+    bool valid = true;
+    std::string fallback;
+    void AddPanel(double power, double length, double remaining);
+    bool IsPositiveSemidefinite() const;
+};
+
+struct StoppingDiagnostics {
+    bool triggered = false, zero_variance_excluded = false;
+    ParticleState trigger;
+    double distance = 0., forward = 0., impact = 0., score = 0.;
+    double a0 = 0., a1 = 0., a2 = 0.;
+    size_t evaluations = 0, predictions = 0, fallbacks = 0;
+    size_t attempted_panels = 0, completed_panels = 0;
+    double predictor_cpu_seconds = 0.;
+    std::map<std::string, size_t> fallback_counts;
+    CoulombDiagnostics transport;
+};
+
 class Propagator {
 public:
     Propagator(const ParticleDef& p_def, const nlohmann::json& config);
@@ -30,12 +61,19 @@ public:
         double max_distance = 1e20, double min_energy = 0.,
         unsigned int hierarchy_condition = 0,
         unsigned int stop_on_entry_hierarchy = 0,
-        bool stop_on_invalid_scattering = false);
+        bool stop_on_invalid_scattering = false,
+        std::shared_ptr<const StoppingPolicy> stopping_policy = nullptr);
     multiple_scattering::MoliereDiagnostics GetMoliereDiagnostics() const
     { return moliere_diagnostics_; }
     const std::string& GetLastTerminationReason() const
     { return last_termination_reason_; }
     const CoulombTransportResult& GetTransportResult() const { return transport_result_; }
+    StoppingDiagnostics GetStoppingDiagnostics() const
+    { auto result = stopping_diagnostics_; result.transport = transport_result_.diagnostics; return result; }
+    CoreMoments PredictCoreMoments(const ParticleState&, double length,
+        double max_distance = 1e20, double min_energy = 0., unsigned int hierarchy_condition = 0);
+    static StoppingDiagnostics EvaluateCoreEnvelope(const ParticleState&,
+        const StoppingPolicy&, const CoreMoments&);
     enum { GEOMETRY, UTILITY, DENSITY_DISTR };
 
 private:
@@ -103,6 +141,7 @@ private:
     multiple_scattering::MoliereDiagnostics moliere_diagnostics_;
     std::string last_termination_reason_ = "unknown";
     CoulombTransportResult transport_result_;
+    StoppingDiagnostics stopping_diagnostics_;
 };
 
 } // namespace PROPOSAL
