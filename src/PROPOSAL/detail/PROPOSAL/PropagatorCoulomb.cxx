@@ -178,9 +178,31 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
         if (record_history_) transport_result_.segments.push_back({before,state,distance,g});
         if (part == 0 && angular > 0.) state.direction = Coulomb::Rotate(state.direction,theta,phi);
     }
-    // Sub-ULP Cartesian displacements are valid when the path advances;
-    // in particular, a pending hard collision must still be sampled below.
-    if (state.propagated_distance <= initial_state.propagated_distance) {
+    // Hinge parts can each round away even when their total is representable.
+    // Restore only that lost total; never invent a coordinate/path increment.
+    if (state.propagated_distance == initial_state.propagated_distance
+        && initial_state.propagated_distance+length > initial_state.propagated_distance) {
+        state.propagated_distance = initial_state.propagated_distance+length;
+        if (record_history_) transport_result_.segments.back().after.propagated_distance = state.propagated_distance;
+    }
+    if (angular > 0.) ++transport_result_.diagnostics.soft_steps;
+    if (!(min_energy_step && result == ReachedInteraction))
+        state.energy = std::max(p_def.mass, utility.EnergyRandomize(initial_energy,
+            (initial_energy-stopping*accumulated),rnd,min_energy)-recoil);
+    if (record_history_) transport_result_.segments.back().after.energy = state.energy;
+    bool collision_processed = false;
+    if (collision && state.energy-p_def.mass >= 0.2) {
+        auto event = model->Sample(state,separation,rnd);
+        state = event.after;
+        if (record_history_) transport_result_.collisions.push_back(event);
+        ++transport_result_.diagnostics.collisions;
+        collision_processed = true;
+    }
+    // A pending interaction is dispatched by the outer loop. A hard collision
+    // has already been sampled here and must change the represented state.
+    const bool event_progress = result == ReachedInteraction || (collision_processed
+        && (state.energy != initial_state.energy || state.direction != initial_state.direction));
+    if (state.propagated_distance <= initial_state.propagated_distance && !event_progress) {
         std::ostringstream error;
         error << std::setprecision(17) << "Nonadvancing Coulomb propagation step: length=" << length
             << " grammage=" << grammage << " event=" << event_grammage << " collision=" << collision_grammage
@@ -191,17 +213,6 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
             << " before_position=" << initial_state.position << " before_direction=" << initial_state.direction
             << " after_path=" << state.propagated_distance << " after_position=" << state.position;
         throw std::runtime_error(error.str());
-    }
-    if (angular > 0.) ++transport_result_.diagnostics.soft_steps;
-    if (!(min_energy_step && result == ReachedInteraction))
-        state.energy = std::max(p_def.mass, utility.EnergyRandomize(initial_energy,
-            (initial_energy-stopping*accumulated),rnd,min_energy)-recoil);
-    if (record_history_) transport_result_.segments.back().after.energy = state.energy;
-    if (collision && state.energy-p_def.mass >= 0.2) {
-        auto event = model->Sample(state,separation,rnd);
-        state = event.after;
-        if (record_history_) transport_result_.collisions.push_back(event);
-        ++transport_result_.diagnostics.collisions;
     }
     if (!std::isfinite(state.energy) || !std::isfinite(state.position.magnitude())
         || std::abs(state.direction.magnitude()-1.) > 1e-12)

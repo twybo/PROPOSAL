@@ -878,3 +878,68 @@ def test_sector_selection_preserves_first_tie_and_highest(second_hierarchy: int)
     assert expected.valid and actual.valid
     assert (actual.a0, actual.a1, actual.a2) == (expected.a0, expected.a1, expected.a2)
     assert actual.attempted_panels == expected.attempted_panels
+
+
+@pytest.mark.parametrize('event_type', ['stochastic', 'collision', 'hinge_collision'])
+def test_positive_sub_ulp_path_dispatches_pending_event(event_type: str) -> None:
+    p, mat = particle('mcp', 100., .1), medium('rock')
+    util = utility(p, mat, 'MoliereInterpol')
+    world = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e15)
+    density = pp.density_distribution.density_homogeneous(mat.mass_density)
+    backend = pp.Propagator(p, [(world, util, density)])
+    if event_type == 'stochastic':
+        initial = state(417185.49855255766)
+        initial.propagated_distance = 52371736.47217162
+        initial.position = pp.Cartesian3D(153719703.37270567, 40249274.331340052, -591373267.97674644)
+        initial.direction = pp.Cartesian3D(-.25178640969133248, -.063766537723566497, .9656797774425524)
+        cuts = pp.EnergyCutSettings(.001, 1.)
+        cross = pp.crosssection.make_crosssection(
+            pp.parametrization.ionization.BetheBlochRossi(cuts), p, mat, cuts, False)
+        rate = float(cross.calculate_dNdx(initial.energy))
+        stopping = float(cross.calculate_dEdx(initial.energy))
+        target_grammage = 3.1729768853911349e-9
+        waiting_draw = math.exp(-target_grammage*rate)
+        target_energy = initial.energy+math.log(waiting_draw)*stopping/rate
+        length = (initial.energy-target_energy)/stopping/mat.mass_density
+        assert target_energy < initial.energy and length > 0.
+        draws = iter([waiting_draw, float(np.nextafter(0., 1.)), .5])
+    else:
+        initial = state(100.43294936001725)
+        initial.propagated_distance = 57157304.747154042
+        initial.position = pp.Cartesian3D(181527663.73712623, -535227198.49910468, 812967190.07541478)
+        initial.direction = pp.Cartesian3D(-.69997128851238888, .26226540221057115, .66427182242033544)
+        length = (4.1928529406541369e-10 if event_type == 'collision' else
+                  .75*math.ulp(initial.propagated_distance))
+        model = pp.scattering.MoliereInterpol(p, mat).coulomb
+        rate = model.moments(initial.energy, 1e-5, 1.).rate
+        collision_draw = math.exp(-length*mat.mass_density*rate)
+        length = -math.log(collision_draw)/rate/mat.mass_density
+        draws = iter([float(np.nextafter(0., 1.)), collision_draw, .5])
+    if event_type == 'hinge_collision':
+        assert initial.propagated_distance+length > initial.propagated_distance
+        assert initial.propagated_distance+length/2 == initial.propagated_distance
+    else:
+        assert initial.propagated_distance+length == initial.propagated_distance
+    fallback = random.Random(67322)
+    def draw() -> float:
+        if backend.transport_result.diagnostics.collisions:
+            raise RuntimeError('next draw after completed event')
+        try:
+            return float(next(draws))
+        except StopIteration:
+            return fallback.random()
+    rng = pp.RandomGenerator.get()
+    rng.set_random_function(draw)
+    try:
+        with pytest.raises(RuntimeError, match='next draw after completed event'):
+            backend.propagate(initial, initial.propagated_distance+1e6)
+    finally:
+        rng.set_default_random_function()
+    result = backend.transport_result
+    assert result.diagnostics.collisions == 1
+    assert result.diagnostics.electron_collisions == (event_type == 'stochastic')
+    event = result.collisions[0]
+    assert event.electron == (event_type == 'stochastic')
+    np.testing.assert_array_equal(xyz(event.before.position), xyz(initial.position))
+    assert event.before.propagated_distance == initial.propagated_distance+length
+    assert event.after.energy < initial.energy or not np.array_equal(xyz(event.after.direction), xyz(initial.direction))
