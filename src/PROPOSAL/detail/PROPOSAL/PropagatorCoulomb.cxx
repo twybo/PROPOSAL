@@ -173,7 +173,8 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
         state.position += distance*state.direction;
         state.propagated_distance += distance;
         state.energy = energy;
-        transport_result_.segments.push_back({before,state,distance,g});
+        ++transport_result_.diagnostics.segments;
+        if (record_history_) transport_result_.segments.push_back({before,state,distance,g});
         if (part == 0 && angular > 0.) state.direction = Coulomb::Rotate(state.direction,theta,phi);
     }
     // Sub-ULP Cartesian displacements are valid when the path advances;
@@ -194,11 +195,11 @@ int Propagator::AdvanceCoulomb(ParticleState& state, double target_energy,
     if (!(min_energy_step && result == ReachedInteraction))
         state.energy = std::max(p_def.mass, utility.EnergyRandomize(initial_energy,
             (initial_energy-stopping*accumulated),rnd,min_energy)-recoil);
-    transport_result_.segments.back().after.energy = state.energy;
+    if (record_history_) transport_result_.segments.back().after.energy = state.energy;
     if (collision && state.energy-p_def.mass >= 0.2) {
         auto event = model->Sample(state,separation,rnd);
         state = event.after;
-        transport_result_.collisions.push_back(event);
+        if (record_history_) transport_result_.collisions.push_back(event);
         ++transport_result_.diagnostics.collisions;
     }
     if (!std::isfinite(state.energy) || !std::isfinite(state.position.magnitude())
@@ -314,6 +315,7 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
     };
     std::vector<AngularQuery> queries;
     if (defer_angular) queries.reserve(512);
+    CoreMoments nuclear;
     auto angular_power = [&](const AngularQuery& query) {
         double polar = query.polar;
         for (const auto& cross : query.cross) {
@@ -388,6 +390,8 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
                 if (defer_angular) {
                     queries.back().panel = panel;
                     queries.back().remaining = length-covered-panel/2.;
+                    const auto& query = queries.back();
+                    nuclear.AddPanel(query.rho*query.polar/2.,query.panel,query.remaining);
                 } else {
                     moments.AddPanel(midpoint.second,panel,length-covered-panel/2.);
                     if (!moments.valid) break;
@@ -398,6 +402,13 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
                 covered = next;
                 ++moments.completed_panels;
                 accepted = true;
+                // All omitted powers/panels are nonnegative. A successful
+                // continuation cannot trigger; an invalid one also continues.
+                if (defer_angular && nuclear.ProvesNontrigger(nontrigger_offset,nontrigger_sigma)) {
+                    moments.valid = false;
+                    moments.nuclear_nontrigger = true;
+                    moments.fallback = "nuclear_nontrigger";
+                }
                 break;
             }
             if (!accepted && moments.valid) fail("panel_budget");
@@ -405,20 +416,6 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
         // Energy/path failures already require full transport. Only schedules
         // that cover L need angular quadrature; retain start/rejected-query
         // validation in the original order as well as accepted midpoints.
-        if (defer_angular && moments.valid && std::isfinite(nontrigger_offset)) {
-            CoreMoments nuclear;
-            for (const auto& query : queries) {
-                if (query.panel > 0.)
-                    nuclear.AddPanel(query.rho*query.polar/2.,query.panel,query.remaining);
-            }
-            // Adding nonnegative electron powers cannot decrease A2. This is
-            // only a nontrigger proof; these are not full predicted moments.
-            if (nuclear.ProvesNontrigger(nontrigger_offset,nontrigger_sigma)) {
-                moments.valid = false;
-                moments.nuclear_nontrigger = true;
-                moments.fallback = "nuclear_nontrigger";
-            }
-        }
         if (defer_angular && moments.valid) {
             for (const auto& query : queries) {
                 try {

@@ -45,6 +45,7 @@ void init_scattering(py::module& m)
         .def_readonly("grammage", &TransportSegment::grammage);
     py::class_<CoulombDiagnostics>(m_sub, "CoulombDiagnostics")
         .def_readonly("collisions", &CoulombDiagnostics::collisions)
+        .def_readonly("segments", &CoulombDiagnostics::segments)
         .def_readonly("electron_collisions", &CoulombDiagnostics::electron_collisions)
         .def_readonly("soft_steps", &CoulombDiagnostics::soft_steps)
         .def_readonly("applicability_failures", &CoulombDiagnostics::applicability_failures);

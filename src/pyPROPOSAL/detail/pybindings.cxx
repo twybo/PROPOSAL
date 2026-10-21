@@ -509,7 +509,7 @@ PYBIND11_MODULE(proposal, m)
             py::arg("max_distance") = 1.e20, py::arg("min_energy") = 0.,
             py::arg("hierarchy_condition") = 0,
             py::arg("stop_on_entry_hierarchy") = 0,
-            py::arg("stop_on_invalid_scattering") = false, py::arg("stopping_policy") = nullptr)
+            py::arg("stop_on_invalid_scattering") = false, py::arg("stopping_policy") = nullptr, py::arg("record_history") = true)
         .def_property_readonly("moliere_diagnostics", &Propagator::GetMoliereDiagnostics)
         .def_static("evaluate_core_envelope", &Propagator::EvaluateCoreEnvelope)
         .def("predict_core_moments", &Propagator::PredictCoreMoments,

@@ -43,7 +43,7 @@ struct TransportSegment {
 
 struct CoulombDiagnostics {
     size_t collisions = 0, soft_steps = 0, applicability_failures = 0;
-    size_t electron_collisions = 0;
+    size_t electron_collisions = 0, segments = 0;
 };
 
 struct CoulombTransportResult {

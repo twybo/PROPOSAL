@@ -91,16 +91,24 @@ Propagator::Propagator(const ParticleDef& p_def, const nlohmann::json& config)
 Secondaries Propagator::Propagate(const ParticleState& initial_particle,
     double max_distance, double min_energy, unsigned int hierarchy_condition,
     unsigned int stop_on_entry_hierarchy, bool stop_on_invalid_scattering,
-    std::shared_ptr<const StoppingPolicy> stopping_policy)
+    std::shared_ptr<const StoppingPolicy> stopping_policy, bool record_history)
 {
     multiple_scattering::Moliere::ResetDiagnostics();
     last_termination_reason_ = "unknown";
     transport_result_ = CoulombTransportResult();
+    record_history_ = record_history;
     stopping_diagnostics_ = StoppingDiagnostics();
     if (stopping_policy) stopping_policy->Validate();
     Secondaries track(std::make_shared<ParticleDef>(p_def), sector_list);
 
     track.push_back(initial_particle, InteractionType::ContinuousEnergyLoss);
+    auto save_state = [&](const ParticleState& point, InteractionType type, size_t component = 0) {
+        if (!record_history_) {
+            track.clear();
+            track.push_back(initial_particle, InteractionType::ContinuousEnergyLoss);
+        }
+        track.push_back(point,type,component);
+    };
     auto state = ParticleState(initial_particle);
     if (!std::isfinite(state.direction.magnitude()) || state.direction.magnitude() == 0.)
         throw std::invalid_argument("Propagation requires a finite nonzero direction");
@@ -130,7 +138,10 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
             {"energy_total_mev",state.energy}, {"path_cm",state.propagated_distance},
             {"position_cm",state.position.GetCartesianCoordinates()},
             {"direction",state.direction.GetCartesianCoordinates()},
-            {"segments",transport_result_.segments.size()},
+            {"segments",transport_result_.diagnostics.segments},
+            {"retained_segments",transport_result_.segments.size()},
+            {"retained_collisions",transport_result_.collisions.size()},
+            {"record_history",record_history_},
             {"soft_steps",transport_result_.diagnostics.soft_steps},
             {"collisions",transport_result_.diagnostics.collisions},
             {"electron_collisions",transport_result_.diagnostics.electron_collisions},
@@ -227,7 +238,7 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                     decision.predictor_cpu_seconds = stopping_diagnostics_.predictor_cpu_seconds;
                     stopping_diagnostics_ = decision;
                     last_termination_reason_ = "approximate_miss";
-                    track.push_back(state, InteractionType::ContinuousEnergyLoss);
+                    save_state(state, InteractionType::ContinuousEnergyLoss);
                     break;
                 }
             } else {
@@ -274,7 +285,7 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
         utility = get<UTILITY>(current_sector);
         density = get<DENSITY_DISTR>(current_sector);
 
-        track.push_back(state, InteractionType::ContinuousEnergyLoss);
+        save_state(state, InteractionType::ContinuousEnergyLoss);
 
         switch (advancement_type) {
         case ReachedCoulombStep:
@@ -300,7 +311,7 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                     loss = DoStochasticInteraction(state, utility, rnd);
                 }
                 if (loss.type != InteractionType::Undefined)
-                    track.push_back(state, loss.type, loss.comp_hash);
+                    save_state(state, loss.type, loss.comp_hash);
                 if (state.energy <= InteractionEnergy[MinimalE]) {
                     continue_propagation = false;
                     last_termination_reason_ = loss.type == InteractionType::Annihilation ? "annihilation" : "energy";
@@ -308,7 +319,7 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                 break;
             }
             case Decay: {
-                track.push_back(state, InteractionType::Decay);
+                save_state(state, InteractionType::Decay);
                 continue_propagation = false;
                 last_termination_reason_ = "decay";
                 break;
@@ -388,7 +399,7 @@ Interaction::Loss Propagator::DoStochasticInteraction(ParticleState& p_cond,
         collision.component = loss.comp_hash;
         collision.recoil = before.energy-p_cond.energy;
         collision.electron = true;
-        transport_result_.collisions.push_back(collision);
+        if (record_history_) transport_result_.collisions.push_back(collision);
         ++transport_result_.diagnostics.collisions;
         ++transport_result_.diagnostics.electron_collisions;
     }

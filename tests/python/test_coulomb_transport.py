@@ -732,3 +732,92 @@ def test_native_progress_preserves_rng_and_terminal_state(monkeypatch: Any, capf
     assert [row['phase'] for row in rows] == ['initial', 'terminal']
     assert rows[-1]['path_cm'] == actual.propagated_distance
     assert rows[-1]['termination_reason'] == 'max_distance'
+
+
+@pytest.mark.parametrize('model', ['MoliereInterpol', 'CoulombDirect', 'straight'])
+def test_terminal_only_recording_preserves_state_rng_and_counts(model: str) -> None:
+    p, mat = particle('mcp', 100., .001), medium('ice')
+    if model == 'straight':
+        cuts = pp.EnergyCutSettings(.001, 1.)
+        cross = [pp.crosssection.make_crosssection(pp.parametrization.ionization.BetheBlochRossi(cuts), p, mat, cuts, False)]
+        collection = pp.PropagationUtilityCollection()
+        collection.displacement = pp.make_displacement(cross, False)
+        collection.interaction = pp.make_interaction(collection.displacement, cross, False)
+        collection.time = pp.make_time(cross, p, False)
+        util = pp.PropagationUtility(collection)
+    else:
+        util = utility(p, mat, model, max_step=.001)
+    world = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e15)
+    density = pp.density_distribution.density_homogeneous(mat.mass_density)
+    backend = pp.Propagator(p, [(world, util, density)])
+    initial = state(1000.)
+    rng = pp.RandomGenerator.get()
+    fields = ('segments', 'collisions', 'soft_steps', 'electron_collisions', 'applicability_failures')
+    rng.set_seed(42185)
+    full = backend.propagate(initial, .01)
+    reference = full.final_state()
+    reference_reason = backend.last_termination_reason
+    reference_counts = tuple(getattr(backend.stopping_diagnostics.transport, name) for name in fields)
+    assert backend.stopping_diagnostics.transport.segments == len(backend.transport_result.segments)
+    next_random = rng.random_double()
+    rng.set_seed(42185)
+    terminal = backend.propagate(initial, .01, record_history=False)
+    actual = terminal.final_state()
+    assert rng.random_double() == next_random
+    assert backend.last_termination_reason == reference_reason
+    assert tuple(getattr(backend.stopping_diagnostics.transport, name) for name in fields) == reference_counts
+    np.testing.assert_array_equal(xyz(actual.position), xyz(reference.position))
+    np.testing.assert_array_equal(xyz(actual.direction), xyz(reference.direction))
+    assert (actual.energy, actual.time, actual.propagated_distance) == (reference.energy, reference.time, reference.propagated_distance)
+    assert len(terminal.track_propagated_distances()) <= 2
+    np.testing.assert_array_equal(xyz(terminal.initial_state().position), xyz(initial.position))
+    assert not backend.transport_result.segments and not backend.transport_result.collisions
+    if model != 'straight':
+        rng.set_seed(42185)
+        backend.propagate(initial, .01)
+        assert len(backend.transport_result.segments) == reference_counts[0] > 2
+
+
+@pytest.mark.parametrize('trigger', [False, True])
+def test_terminal_only_recording_preserves_pre_step_state(trigger: bool) -> None:
+    backend = cutoff_backend()
+    initial = envelope_state(20., 1000.)
+    initial.direction = pp.Cartesian3D(0., 0., 2.)
+    if not trigger:
+        initial.energy = 100.2
+    full = backend.propagate(initial, 2000., 0., 1, 3, True, stopping_policy())
+    expected = full.final_state()
+    reason = backend.last_termination_reason
+    terminal = backend.propagate(initial, 2000., 0., 1, 3, True, stopping_policy(), record_history=False)
+    actual = terminal.final_state()
+    assert backend.last_termination_reason == reason
+    np.testing.assert_array_equal(xyz(actual.position), xyz(expected.position))
+    np.testing.assert_array_equal(xyz(actual.direction), xyz(expected.direction))
+    assert (actual.energy, actual.propagated_distance) == (expected.energy, expected.propagated_distance)
+    assert len(terminal.track_propagated_distances()) <= 2
+    assert not backend.transport_result.segments
+
+
+def test_partial_nuclear_bound_skips_doomed_schedule_before_next_draw() -> None:
+    backend = cutoff_backend(.1, 'rock', 1e15)
+    initial = envelope_state(3., 1e12)
+    initial.energy = 1e6
+    standalone = backend.predict_core_moments(initial, 1e12)
+    assert not standalone.valid and standalone.fallback == 'panel_budget'
+    assert standalone.attempted_panels == 256
+    draws = []
+    def invalid_draw() -> float:
+        draws.append(1.)
+        return 1.
+    rng = pp.RandomGenerator.get()
+    rng.set_random_function(invalid_draw)
+    try:
+        with pytest.raises(RuntimeError, match='Invalid transport random number'):
+            backend.propagate(initial, 1e12+1000., 0., 1, 3, True, stopping_policy(), record_history=False)
+    finally:
+        rng.set_default_random_function()
+    diagnostics = backend.stopping_diagnostics
+    assert diagnostics.predictions == diagnostics.nuclear_nontrigger_bounds == 1
+    assert 0 < diagnostics.completed_panels <= diagnostics.attempted_panels < 256
+    assert diagnostics.fallbacks == 0 and not diagnostics.triggered
+    assert len(draws) == 2

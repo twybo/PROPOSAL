@@ -63,7 +63,8 @@ public:
         unsigned int hierarchy_condition = 0,
         unsigned int stop_on_entry_hierarchy = 0,
         bool stop_on_invalid_scattering = false,
-        std::shared_ptr<const StoppingPolicy> stopping_policy = nullptr);
+        std::shared_ptr<const StoppingPolicy> stopping_policy = nullptr,
+        bool record_history = true);
     multiple_scattering::MoliereDiagnostics GetMoliereDiagnostics() const
     { return moliere_diagnostics_; }
     const std::string& GetLastTerminationReason() const
@@ -145,6 +146,7 @@ private:
     multiple_scattering::MoliereDiagnostics moliere_diagnostics_;
     std::string last_termination_reason_ = "unknown";
     CoulombTransportResult transport_result_;
+    bool record_history_ = true;
     StoppingDiagnostics stopping_diagnostics_;
 };
 
