@@ -821,3 +821,60 @@ def test_partial_nuclear_bound_skips_doomed_schedule_before_next_draw() -> None:
     assert 0 < diagnostics.completed_panels <= diagnostics.attempted_panels < 256
     assert diagnostics.fallbacks == 0 and not diagnostics.triggered
     assert len(draws) == 2
+
+
+
+def test_sub_ulp_stochastic_wait_dispatches_pending_event() -> None:
+    p, mat = particle('mcp', 100., .1), medium('rock')
+    util = utility(p, mat, 'MoliereInterpol')
+    world = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e15)
+    density = pp.density_distribution.density_homogeneous(mat.mass_density)
+    backend = pp.Propagator(p, [(world, util, density)])
+    initial = state(49902853.618405782)
+    initial.propagated_distance = 1224906.644206516
+    # Waiting loss rounds below one energy ULP; then sample ionization and phi.
+    draws = iter([float(np.nextafter(1., 0.)), .5, .5])
+    count = 0
+    def draw() -> float:
+        nonlocal count
+        count += 1
+        try:
+            return next(draws)
+        except StopIteration:
+            raise RuntimeError('next waiting draw')
+    rng = pp.RandomGenerator.get()
+    rng.set_random_function(draw)
+    try:
+        with pytest.raises(RuntimeError, match='next waiting draw'):
+            backend.propagate(initial, initial.propagated_distance+1e6)
+    finally:
+        rng.set_default_random_function()
+    result = backend.transport_result
+    assert count == 4
+    assert result.diagnostics.segments == 0 and not result.segments
+    assert result.diagnostics.collisions == result.diagnostics.electron_collisions == 1
+    collision = result.collisions[0]
+    assert collision.electron and collision.after.energy < collision.before.energy
+    assert collision.before.energy == initial.energy
+    assert collision.after.propagated_distance == initial.propagated_distance
+    np.testing.assert_array_equal(xyz(collision.after.position), xyz(initial.position))
+
+
+@pytest.mark.parametrize('second_hierarchy', [2, 3])
+def test_sector_selection_preserves_first_tie_and_highest(second_hierarchy: int) -> None:
+    p = particle('mcp', 100., .01)
+    ice, rock = medium('ice'), medium('rock')
+    ui, ur = utility(p, ice, 'MoliereInterpol'), utility(p, rock, 'MoliereInterpol')
+    di = pp.density_distribution.density_homogeneous(ice.mass_density)
+    dr = pp.density_distribution.density_homogeneous(rock.mass_density)
+    first = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e15)
+    second = pp.geometry.Sphere(pp.Cartesian3D(0., 0., 0.), 1e15)
+    first.hierarchy, second.hierarchy = 2, second_hierarchy
+    selected = (first, ui, di) if second_hierarchy == 2 else (second, ur, dr)
+    backend = pp.Propagator(p, [(first, ui, di), (second, ur, dr)])
+    reference = pp.Propagator(p, [selected])
+    expected = reference.predict_core_moments(state(1000.), 100.)
+    actual = backend.predict_core_moments(state(1000.), 100.)
+    assert expected.valid and actual.valid
+    assert (actual.a0, actual.a1, actual.a2) == (expected.a0, expected.a1, expected.a2)
+    assert actual.attempted_panels == expected.attempted_panels

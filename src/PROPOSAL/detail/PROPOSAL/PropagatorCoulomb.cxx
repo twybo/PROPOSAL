@@ -7,6 +7,7 @@
 #include "PROPOSAL/geometry/Sphere.h"
 #include "PROPOSAL/geometry/Box.h"
 #include "PROPOSAL/geometry/Cylinder.h"
+#include <array>
 #include <cmath>
 #include <ctime>
 #include "PROPOSAL/propagation_utility/Displacement.h"
@@ -307,18 +308,20 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
     if (!std::isfinite(state.direction.magnitude()) || state.direction.magnitude() == 0.) fail("invalid_direction");
     if (moments.valid) state.direction.normalize();
     struct AngularQuery {
-        std::shared_ptr<Coulomb> model;
-        std::vector<std::shared_ptr<CrossSectionBase>> cross;
+        const Coulomb* model;
+        const std::vector<std::shared_ptr<CrossSectionBase>>* cross;
         double energy, rho, polar;
         size_t attempted, completed;
-        double panel = 0., remaining = 0.;
+        double panel, remaining;
     };
-    std::vector<AngularQuery> queries;
-    if (defer_angular) queries.reserve(512);
+    // At most one start query per attempted panel and one midpoint query per
+    // attempt. Sector-owned models/cross sections outlive this bounded scratch.
+    std::array<AngularQuery,512> queries;
+    size_t query_count = 0;
     CoreMoments nuclear;
     auto angular_power = [&](const AngularQuery& query) {
         double polar = query.polar;
-        for (const auto& cross : query.cross) {
+        for (const auto& cross : *query.cross) {
             if (cross->GetInteractionType() == InteractionType::Ioniz) {
                 ++moments.angular_evaluations;
                 polar += query.model->ElectronAngular(query.energy,*cross);
@@ -333,10 +336,10 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
     try {
         while (moments.valid && covered < length) {
             if (moments.attempted_panels >= 256) { fail("panel_budget"); break; }
-            const auto sector = GetCurrentSector(state.position,state.direction);
-            const auto geometry = std::get<GEOMETRY>(sector);
-            auto utility = std::get<UTILITY>(sector);
-            const auto density = std::get<DENSITY_DISTR>(sector);
+            const auto& sector = GetCurrentSector(state.position,state.direction);
+            const auto& geometry = std::get<GEOMETRY>(sector);
+            const auto& utility = std::get<UTILITY>(sector);
+            const auto& density = std::get<DENSITY_DISTR>(sector);
             if (geometry->GetHierarchy() < hierarchy_condition) { fail("earth_exit"); break; }
             if (!dynamic_cast<const Sphere*>(geometry.get()) && !dynamic_cast<const Box*>(geometry.get())
                 && !dynamic_cast<const Cylinder*>(geometry.get())) { fail("unsupported_geometry"); break; }
@@ -361,10 +364,10 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
                 stopping *= rho;
                 if (!std::isfinite(stopping) || stopping < 0.)
                     throw std::domain_error("invalid prediction stopping");
-                AngularQuery query{model, cross_sections, energy, rho, soft.angular,
-                    moments.attempted_panels, moments.completed_panels};
+                AngularQuery query{model.get(), &cross_sections, energy, rho, soft.angular,
+                    moments.attempted_panels, moments.completed_panels, 0., 0.};
                 if (defer_angular) {
-                    queries.push_back(std::move(query));
+                    queries[query_count++] = query;
                     return std::make_pair(stopping,0.);
                 }
                 return std::make_pair(stopping,angular_power(query));
@@ -388,9 +391,9 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
                 }
                 if (state.energy-loss <= floor) { fail("energy_domain"); break; }
                 if (defer_angular) {
-                    queries.back().panel = panel;
-                    queries.back().remaining = length-covered-panel/2.;
-                    const auto& query = queries.back();
+                    queries[query_count-1].panel = panel;
+                    queries[query_count-1].remaining = length-covered-panel/2.;
+                    const auto& query = queries[query_count-1];
                     nuclear.AddPanel(query.rho*query.polar/2.,query.panel,query.remaining);
                 } else {
                     moments.AddPanel(midpoint.second,panel,length-covered-panel/2.);
@@ -417,7 +420,8 @@ CoreMoments Propagator::PredictCoreMomentsImpl(const ParticleState& initial, dou
         // that cover L need angular quadrature; retain start/rejected-query
         // validation in the original order as well as accepted midpoints.
         if (defer_angular && moments.valid) {
-            for (const auto& query : queries) {
+            for (size_t i = 0; i < query_count; ++i) {
+                const auto& query = queries[i];
                 try {
                     const double power = angular_power(query);
                     if (query.panel > 0.) moments.AddPanel(power,query.panel,query.remaining);

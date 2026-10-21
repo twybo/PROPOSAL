@@ -96,7 +96,7 @@ private:
         const Vector3D& particle_direction, const Geometry& current_geometry);
     int maximize(const std::array<double, 3>& InteractionEnergies);
     int minimize(const std::array<double, 3>& AdvanceDistances);
-    Sector GetCurrentSector(
+    const Sector& GetCurrentSector(
         const Vector3D& particle_position, const Vector3D& particle_direction);
     // Global settings
     struct GlobalSettings {

@@ -246,17 +246,23 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
                     stopping_diagnostics_.fallback_counts[item.first] += item.second;
             }
         }
+        bool valid_stochastic_wait = false, valid_decay_wait = false;
         if (utility.collection.scattering && utility.collection.scattering->GetCoulomb()) {
             double stopping = 0., rate = 0.;
             for (const auto& cross : utility.collection.interaction_calc->GetCrossSections()) {
                 stopping += cross->CalculatedEdx(state.energy);
                 rate += cross->CalculatedNdx(state.energy);
             }
+            const double stochastic_draw = rate > 0. ? rnd() : 0.;
+            valid_stochastic_wait = stochastic_draw >= 0. && stochastic_draw < 1.;
             InteractionEnergy[Stochastic] = rate > 0.
-                ? state.energy+std::log(std::max(rnd(),std::numeric_limits<double>::min()))*stopping/rate : -INF;
+                ? state.energy+std::log(std::max(stochastic_draw,std::numeric_limits<double>::min()))*stopping/rate : -INF;
             const double momentum = std::sqrt((state.energy-p_def.mass)*(state.energy+p_def.mass));
-            InteractionEnergy[Decay] = utility.collection.decay_calc && std::isfinite(p_def.lifetime) && p_def.lifetime > 0.
-                ? state.energy+std::log(std::max(rnd(),std::numeric_limits<double>::min()))
+            const bool decays = utility.collection.decay_calc && std::isfinite(p_def.lifetime) && p_def.lifetime > 0.;
+            const double decay_draw = decays ? rnd() : 0.;
+            valid_decay_wait = decay_draw >= 0. && decay_draw < 1.;
+            InteractionEnergy[Decay] = decays
+                ? state.energy+std::log(std::max(decay_draw,std::numeric_limits<double>::min()))
                     *p_def.lifetime*SPEED*momentum/p_def.mass*density->Evaluate(state.position)*stopping : -INF;
         } else {
             InteractionEnergy[Decay] = utility.EnergyDecay(
@@ -268,7 +274,15 @@ Secondaries Propagator::Propagate(const ParticleState& initial_particle,
         auto energy_at_next_interaction
             = InteractionEnergy[next_interaction_type];
 
-        advancement_type = AdvanceParticle(
+        // A sub-ULP waiting loss can round back to the current energy.
+        // Dispatch the already sampled event without a zero physical step or
+        // consuming hinge/collision random numbers for that nonexistent step.
+        const bool pending_coulomb_event = utility.collection.scattering
+            && utility.collection.scattering->GetCoulomb()
+            && ((next_interaction_type == Stochastic && valid_stochastic_wait)
+                || (next_interaction_type == Decay && valid_decay_wait))
+            && energy_at_next_interaction == state.energy;
+        advancement_type = pending_coulomb_event ? ReachedInteraction : AdvanceParticle(
                 state, energy_at_next_interaction, max_distance, rnd,
                 current_sector, next_interaction_type == MinimalE,
                 InteractionEnergy[MinimalE], hierarchy_condition,
@@ -661,34 +675,30 @@ int Propagator::minimize(const std::array<double, 3>& AdvanceDistances)
     return std::distance(AdvanceDistances.begin(), min_element_ref);
 }
 
-Sector Propagator::GetCurrentSector(
+const Sector& Propagator::GetCurrentSector(
     const Vector3D& position, const Vector3D& direction)
 {
-    auto potential_sec = std::vector<Sector*> {};
+    const Sector* highest = nullptr;
     const double tolerance = std::max(4*GEOMETRY_PRECISION,
         64*std::numeric_limits<double>::epsilon()*std::max(1.,position.magnitude()));
     const auto probe = Cartesian3D(position)+tolerance*Cartesian3D(direction);
-    for (auto& sector : sector_list) {
-        if (get<GEOMETRY>(sector)->IsInside(probe, direction))
-            potential_sec.push_back(&sector);
+    for (const auto& sector : sector_list) {
+        if (get<GEOMETRY>(sector)->IsInside(probe, direction)
+            && (!highest || get<GEOMETRY>(sector)->GetHierarchy()
+                > get<GEOMETRY>(*highest)->GetHierarchy()))
+            highest = &sector;
     }
 
-    if (potential_sec.empty()) {
+    if (!highest) {
         auto spherical_position = Cartesian3D(position);
         Logging::Get("proposal.propagator")->critical("No sector defined at particle position {}, {}, {}.",
                                                       spherical_position.GetX(),
                                                       spherical_position.GetY(),
                                                       spherical_position.GetZ());
     }
-    if (potential_sec.empty())
+    if (!highest)
         throw std::out_of_range("No sector contains the particle's forward tangent");
-    auto highest_sector_iter = std::max_element(
-        potential_sec.begin(), potential_sec.end(), [](Sector* a, Sector* b) {
-            return get<GEOMETRY>(*a)->GetHierarchy()
-                < get<GEOMETRY>(*b)->GetHierarchy();
-        });
-
-    return **highest_sector_iter;
+    return *highest;
 }
 
 // Init methods
